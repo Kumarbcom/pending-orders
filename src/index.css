@@ -1,0 +1,70 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-serif: "Cambria", "Hoefler Text", "Libre Baskerville", "Times New Roman", serif;
+
+  --color-bg: #f8fafc;
+  --color-surface: #ffffff;
+  --color-surface2: #f1f5f9;
+  --color-primary: #3b82f6;
+  --color-text-main: #0f172a;
+  --color-text-muted: #64748b;
+  --color-border-custom: #e2e8f0;
+  --color-grid: #dfe3e8;
+  
+  --color-due: #ef4444;
+  --color-sched: #3b82f6;
+  --color-avail: #10b981;
+  --color-arrange: #f59e0b;
+}
+
+@layer base {
+  body {
+    @apply bg-bg text-text-main font-sans antialiased text-[14px] min-h-screen overflow-hidden;
+    background-color: var(--color-bg);
+  }
+}
+
+@layer components {
+  .scrollbar-custom::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-custom::-webkit-scrollbar-track {
+    background: var(--color-bg);
+  }
+  .scrollbar-custom::-webkit-scrollbar-thumb {
+    background: var(--color-border-custom);
+    border-radius: 10px;
+  }
+  .scrollbar-custom::-webkit-scrollbar-thumb:hover {
+    background: var(--color-text-muted);
+  }
+
+  .glass-card {
+    @apply bg-surface/80 backdrop-blur-md border border-border-custom shadow-sm;
+  }
+
+  /* Excel High Density Styles */
+  .excel-table {
+    @apply font-serif border-collapse w-full;
+  }
+  .excel-table th {
+    @apply bg-surface2 border border-grid text-[12px] font-black text-text-muted px-2 py-1 text-left uppercase tracking-tighter;
+    background-image: linear-gradient(to bottom, #ffffff11, #00000008);
+  }
+  .excel-table td {
+    @apply border border-grid text-[10px] px-2 py-1 align-top leading-tight;
+  }
+  .excel-table tr:nth-child(even) {
+    @apply bg-surface2/20;
+  }
+  .excel-table tr:hover {
+    @apply bg-primary/5;
+  }
+}
+
+
