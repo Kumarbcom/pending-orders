@@ -62,18 +62,20 @@ export interface CustomerMasterItem {
 }
 
 export interface InvoiceItem {
-  Particulars: string;
+  Description: string;
   Quantity: number;
   Value: number;
 }
 
 export interface Invoice {
   Date: string;
+  Particulars: string;
   Buyer: string;
   Consignee: string;
+  VoucherType: string;
   VoucherNo: string;
   VoucherRef: string;
+  GSTIN: string;
   Quantity: number;
   Value: number;
-  Items: InvoiceItem[];
 }

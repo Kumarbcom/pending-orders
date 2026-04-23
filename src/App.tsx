@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, ChangeEvent } from 'react';
+import React, { useState, useMemo, useRef, useEffect, ChangeEvent } from 'react';
 import { 
   Package, 
   Users, 
@@ -20,7 +20,9 @@ import {
   ArrowUpDown,
   RefreshCw,
   XCircle,
-  Menu
+  X,
+  Menu,
+  FileCheck
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { 
@@ -35,12 +37,16 @@ import {
   CartesianGrid, 
   Tooltip, 
   Legend,
-  Bar as ReBar 
+  Bar as ReBar,
+  LabelList
 } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
 import { ALL_SO as INITIAL_SO, ALL_INVOICE, META } from './data';
 import { SalesOrder, Invoice, PurchaseOrder, StockItem, MaterialMasterItem, CustomerMasterItem } from './types';
 import { cn } from './lib/utils';
+import logo from './logo.jpg';
+import { db } from './firebase';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 // --- Utils ---
 const fmtCur = (v: number) => {
@@ -48,33 +54,98 @@ const fmtCur = (v: number) => {
   const abs = Math.abs(v);
   if (abs >= 1e7) return '₹' + (v / 1e7).toFixed(2) + ' Cr';
   if (abs >= 1e5) return '₹' + (v / 1e5).toFixed(2) + ' L';
-  return '₹' + v.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+  return '₹' + v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
 const fmtNum = (v: number) => {
   if (v == null) return '—';
-  return v.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+  return v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
-const fmtDate = (d: string | null) => {
+const fmtDate = (d: any) => {
   if (!d) return '—';
-  const parts = d.split('-');
-  if (parts.length !== 3) return d;
-  return `${parts[2]}/${parts[1]}/${parts[0]}`;
+  let dt: Date;
+  
+  if (d instanceof Date) {
+    dt = d;
+  } else if (typeof d === 'number') {
+    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+    dt = new Date(excelEpoch.getTime() + d * 86400000);
+  } else {
+    const str = String(d);
+    dt = new Date(str);
+    if (isNaN(dt.getTime())) {
+      const parts = str.split(/[\/\-\.]/);
+      if (parts.length === 3) {
+        // Handle DD.MM.YYYY or YYYY.MM.DD
+        if (parts[2].length === 4) dt = new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
+        else if (parts[0].length === 4) dt = new Date(`${parts[0]}-${parts[1]}-${parts[2]}`);
+      }
+    }
+  }
+
+  if (isNaN(dt.getTime())) return String(d);
+  
+  const day = dt.getDate().toString().padStart(2, '0');
+  const month = dt.toLocaleString('en-GB', { month: 'short' });
+  const year = dt.getFullYear().toString().slice(-2);
+  return `${day}-${month}-${year}`;
 };
+
+const parseDateObj = (d: any): Date | null => {
+  if (!d) return null;
+  if (d instanceof Date) return d;
+  try {
+    if (typeof d === 'number') {
+       const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+       return new Date(excelEpoch.getTime() + d * 86400000);
+    }
+    const str = String(d);
+    const dt = new Date(str);
+    if (!isNaN(dt.getTime())) return dt;
+    
+    const parts = str.split(/[\/\-\.]/);
+    if (parts.length === 3) {
+      if (parts[2].length === 4) return new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
+      if (parts[0].length === 4) return new Date(`${parts[0]}-${parts[1]}-${parts[2]}`);
+    }
+  } catch(e) { return null; }
+  return null;
+};
+
+// --- Error Boundary ---
+class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean}> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() { return { hasError: true }; }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="h-screen w-full flex flex-col items-center justify-center bg-bg text-text-main p-10 text-center">
+          <h2 className="text-2xl font-black mb-4 uppercase tracking-tighter">Something went wrong</h2>
+          <p className="text-text-muted mb-6">The application encountered an unexpected error. Please try refreshing or resetting the data.</p>
+          <button onClick={() => window.location.reload()} className="bg-primary text-white px-6 py-3 rounded-xl font-bold uppercase tracking-widest text-xs">Refresh Application</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // --- Components ---
 
 const StatCard = ({ title, value, subValue, type, details }: any) => (
-  <div className="bg-surface border border-border-custom rounded-2xl p-6 shadow-sm flex flex-col relative transition-all hover:shadow-md">
-    <div className="flex justify-between items-start mb-3">
-      <span className="text-[11px] font-bold uppercase tracking-wider text-text-muted">
+  <div className="bg-surface border border-border-custom rounded-2xl p-4 shadow-sm flex flex-col relative transition-all hover:shadow-md">
+    <div className="flex justify-between items-start mb-2">
+      <span className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
         {title}
       </span>
       {type === 'due' && <AlertCircle className="w-4 h-4 text-due" />}
       {type === 'sched' && <TrendingUp className="w-4 h-4 text-sched" />}
     </div>
-    <div className="text-3xl font-bold text-text-main mb-1 tracking-tight">
+    <div className="text-[22px] leading-none font-bold text-text-main mb-1 tracking-tight">
       {value}
     </div>
     {subValue && (
@@ -84,11 +155,11 @@ const StatCard = ({ title, value, subValue, type, details }: any) => (
     )}
     
     {details && (
-      <div className="flex gap-4 mt-5 pt-5 border-t border-border-custom">
+      <div className="grid grid-cols-2 gap-y-4 gap-x-2 mt-5 pt-5 border-t border-border-custom">
         {details.map((d: any, i: number) => (
-          <div key={i} className="flex-1">
-            <div className="text-[9px] font-bold text-text-muted uppercase mb-1 tracking-wide">{d.label}</div>
-            <div className={cn("font-bold text-[13px] leading-none", d.color)}>{d.value}</div>
+          <div key={i}>
+            <div className="text-[8px] font-black text-text-muted uppercase mb-1 tracking-widest leading-tight h-5 flex items-end">{d.label}</div>
+            <div className={cn("font-black text-[11px] leading-tight break-all", d.color)}>{d.value}</div>
           </div>
         ))}
       </div>
@@ -120,21 +191,163 @@ const Th = ({ children, onSort, sortKey, activeField, direction, className }: an
   </th>
 );
 
-export default function App() {
+const exportToExcel = (data: any[], fileName: string) => {
+  try {
+    if (!data || !data.length) {
+      alert("No data available to export.");
+      return;
+    }
+    const cleanName = (fileName || 'Report').replace(/[^a-z0-9]/gi, '_').slice(0, 50);
+    const headers = Object.keys(data[0]);
+
+    // Create styled HTML table
+    let tableRows = `<tr>${headers.map(h => `<th style="background-color: #E0E0E0; border: 1px solid #000000; font-family: 'Cambria', serif; font-size: 10pt; text-align: left; padding: 5px;">${h}</th>`).join('')}</tr>`;
+    
+    data.forEach(row => {
+      tableRows += '<tr>';
+      headers.forEach(h => {
+        let val = row[h];
+        if (val === null || val === undefined) val = '';
+        
+        const isNum = /rate|value|price|amount|balance|total|ordered|qty/i.test(h);
+        const isDate = /date|due/i.test(h);
+        
+        let style = "border: 1px solid #000000; font-family: 'Cambria', serif; font-size: 10pt; padding: 5px;";
+        let msoFormat = "";
+        
+        if (isNum) {
+          style += " text-align: right;";
+          msoFormat = 'style="mso-number-format:\'\\#\\,\\#\\#0\\.00\'"';
+        } else if (isDate) {
+          msoFormat = 'style="mso-number-format:\'dd\\-mmm\\-yy\'"';
+        } else {
+          msoFormat = 'style="mso-number-format:\'@\'"'; // Format as text
+        }
+        
+        tableRows += `<td ${msoFormat} style="${style}">${val}</td>`;
+      });
+      tableRows += '</tr>';
+    });
+
+    const html = `
+      <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+      <head><meta charset="utf-8"></head>
+      <body>
+        <table border="1">${tableRows}</table>
+      </body>
+      </html>
+    `;
+
+    const blob = new Blob([html], { type: 'application/vnd.ms-excel' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${cleanName}.xls`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error("Export Error:", err);
+    alert("Export failed: " + err);
+  }
+};
+
+function MainApp() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'pending-so' | 'pending-po' | 'stock' | 'material-master' | 'customer-master' | 'invoices' | 'customers'>('dashboard');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   
   // Data States
-  const [dynamicSO, setDynamicSO] = useState<SalesOrder[]>(INITIAL_SO);
+  const [dynamicSO, setDynamicSO] = useState<SalesOrder[]>([]);
   const [dynamicPO, setDynamicPO] = useState<PurchaseOrder[]>([]);
   const [dynamicStock, setDynamicStock] = useState<StockItem[]>([]);
   const [dynamicMaterialMaster, setDynamicMaterialMaster] = useState<MaterialMasterItem[]>([]);
   const [dynamicCustomerMaster, setDynamicCustomerMaster] = useState<CustomerMasterItem[]>([]);
   const [dynamicInvoices, setDynamicInvoices] = useState<Invoice[]>([]);
+  const [showUploadMenu, setShowUploadMenu] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [soSearch, setSoSearch] = useState('');
+  const [poSearch, setPoSearch] = useState('');
+  const [stockSearch, setStockSearch] = useState('');
+  const [materialSearch, setMaterialSearch] = useState('');
+  const [customerMasterSearch, setCustomerMasterSearch] = useState('');
+  const [invoiceSearch, setInvoiceSearch] = useState('');
+  const [popupSearch, setPopupSearch] = useState('');
+  const [isSyncing, setIsSyncing] = useState(false);
+  const uploadMenuRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileInputPORef = useRef<HTMLInputElement>(null);
+  const fileInputStockRef = useRef<HTMLInputElement>(null);
+  const fileInputMaterialRef = useRef<HTMLInputElement>(null);
+  const fileInputCustomerRef = useRef<HTMLInputElement>(null);
+  const fileInputInvoiceRef = useRef<HTMLInputElement>(null);
 
   // Sorting State
   const [sortField, setSortField] = useState<string | null>(null);
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+
+  // Dashboard Slicers
+  const [dMake, setDMake] = useState('');
+  const [dGroup, setDGroup] = useState('');
+  const [dCGroup, setDCGroup] = useState('');
+  const [dOrderType, setDOrderType] = useState('');
+
+  // Pending SO Slicers
+  const [soType, setSoType] = useState('');
+  const [soMake, setSoMake] = useState('');
+  const [soGroup, setSoGroup] = useState('');
+  const [soCust, setSoCust] = useState('');
+  const [soStatus, setSoStatus] = useState('');
+
+  // Customers Slicers
+  const [cGroup, setCGroup] = useState('');
+  const [cCGroup, setCCGroup] = useState('');
+  const [cCust, setCCust] = useState('');
+  const [cSearch, setCSearch] = useState('');
+
+  // DETAILS POPUP STATE
+  const [showSOPopup, setShowSOPopup] = useState<string | null>(null);
+  const [showInvPopup, setShowInvPopup] = useState<string | null>(null);
+
+   // --- Firebase Persistence Logic ---
+   const saveToFirebase = async (type: string, data: any) => {
+     setIsSyncing(true);
+     try {
+       await setDoc(doc(db, "app_data", type), { data, updatedAt: new Date().toISOString() });
+     } catch (error) {
+       console.error(`Error saving ${type}:`, error);
+     } finally {
+       setIsSyncing(false);
+     }
+   };
+
+   useEffect(() => {
+     const loadData = async () => {
+       setIsSyncing(true);
+       try {
+         const datasets = [
+           { type: 'dynamicSO', setter: setDynamicSO },
+           { type: 'dynamicPO', setter: setDynamicPO },
+           { type: 'dynamicStock', setter: setDynamicStock },
+           { type: 'dynamicMaterialMaster', setter: setDynamicMaterialMaster },
+           { type: 'dynamicCustomerMaster', setter: setDynamicCustomerMaster },
+           { type: 'dynamicInvoices', setter: setDynamicInvoices }
+         ];
+
+         for (const ds of datasets) {
+           const snap = await getDoc(doc(db, "app_data", ds.type));
+           if (snap.exists()) {
+             ds.setter(snap.data().data || []);
+           }
+         }
+       } catch (error) {
+         console.error("Error loading data from Firebase:", error);
+       } finally {
+         setIsSyncing(false);
+       }
+     };
+     loadData();
+   }, []);
 
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -146,20 +359,52 @@ export default function App() {
   };
 
   const handleReset = (type: 'so' | 'po' | 'stock' | 'material' | 'customer' | 'invoice' | 'all') => {
-    if (type === 'so' || type === 'all') setDynamicSO(INITIAL_SO);
-    if (type === 'po' || type === 'all') setDynamicPO([]);
-    if (type === 'stock' || type === 'all') setDynamicStock([]);
-    if (type === 'material' || type === 'all') setDynamicMaterialMaster([]);
-    if (type === 'customer' || type === 'all') setDynamicCustomerMaster([]);
-    if (type === 'invoice' || type === 'all') setDynamicInvoices([]);
+    setSearchTerm('');
+    setPopupSearch('');
+    if (type === 'so' || type === 'all') { 
+      setSoType(''); setSoMake(''); setSoGroup(''); setSoCust(''); setSoStatus(''); 
+      setDMake(''); setDGroup(''); setDCGroup(''); setDOrderType('');
+    }
+    if (type === 'po' || type === 'all') { setPoSearch(''); }
+    if (type === 'stock' || type === 'all') { setStockSearch(''); }
+    if (type === 'material' || type === 'all') { setMaterialSearch(''); }
+    if (type === 'customer' || type === 'all') { setCustomerMasterSearch(''); setCSearch(''); setCGroup(''); setCCGroup(''); }
+    if (type === 'invoice' || type === 'all') { setInvoiceSearch(''); }
   };
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const fileInputPORef = useRef<HTMLInputElement>(null);
-  const fileInputStockRef = useRef<HTMLInputElement>(null);
-  const fileInputMaterialRef = useRef<HTMLInputElement>(null);
-  const fileInputCustomerRef = useRef<HTMLInputElement>(null);
-  const fileInputInvoiceRef = useRef<HTMLInputElement>(null);
+  const handleWipeData = async () => {
+    if (!confirm("ARE YOU SURE? This will permanently delete ALL uploaded data from the cloud database.")) return;
+    setIsSyncing(true);
+    try {
+      const types = ['dynamicSO', 'dynamicPO', 'dynamicStock', 'dynamicMaterialMaster', 'dynamicCustomerMaster', 'dynamicInvoices'];
+      for (const t of types) {
+        await saveToFirebase(t, []);
+      }
+      setDynamicSO([]);
+      setDynamicPO([]);
+      setDynamicStock([]);
+      setDynamicMaterialMaster([]);
+      setDynamicCustomerMaster([]);
+      setDynamicInvoices([]);
+      handleReset('all');
+      alert("Database wiped successfully.");
+    } catch (err) {
+      alert("Error wiping database: " + err);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // Close upload menu on outside click
+  React.useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (uploadMenuRef.current && !uploadMenuRef.current.contains(event.target as Node)) {
+        setShowUploadMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   const handleFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -171,11 +416,30 @@ export default function App() {
       const wb = XLSX.read(bstr, { type: 'binary' });
       const wsname = wb.SheetNames[0];
       const ws = wb.Sheets[wsname];
-      const data = XLSX.utils.sheet_to_json(ws);
+      const rawData = (XLSX.utils.sheet_to_json(ws, { header: 1 }) || []) as any[][];
+      if (!rawData || rawData.length === 0) return;
+      
+      let headerIdx = 0;
+      for (let i = 0; i < Math.min(rawData.length, 20); i++) {
+        const row = rawData[i];
+        if (row && row.some(cell => typeof cell === 'string' && (cell.includes("Party") || cell.includes("Name of Item") || cell.includes("Due") || cell.includes("Customer")))) {
+          headerIdx = i;
+          break;
+        }
+      }
 
-      // Clean and map data based on the screenshot provided
-      const parsed: SalesOrder[] = data.map((row: any) => {
-        // Simple numeric extraction for fields like "105 ST"
+      const headers = rawData[headerIdx] || [];
+      const rows = rawData.slice(headerIdx + 1);
+
+      const parsed: SalesOrder[] = rows.map((rowArr: any[]) => {
+        const row: any = {};
+        headers.forEach((h, idx) => {
+          if (h && typeof h === 'string') {
+             const cleanHeader = h.replace(/\r?\n|\r/g, ' ').trim();
+             row[cleanHeader] = rowArr[idx];
+          }
+        });
+
         const extractNum = (val: any) => {
           if (typeof val === 'number') return val;
           if (!val) return 0;
@@ -183,21 +447,29 @@ export default function App() {
           return match ? parseFloat(match[0]) : 0;
         };
 
+        const party = String(row["Party's Name"] || row['Party Name'] || row['End-Customer'] || row['Customer'] || '').trim();
+        const itemName = String(row['Name of Item'] || row['Item Name'] || row['Description'] || '').trim();
+        const orderQty = extractNum(row['Ordered'] || row['Order'] || row['Ordered Qty'] || row['Qty']);
+        const balQty = extractNum(row['Balance'] || row['Balar'] || row['Balance Qty']);
+        const val = extractNum(row['Value'] || row['Amount']);
+
+        if (!party && !itemName) return null; // Skip empty rows
+
         return {
-          Date: row['Due'] || new Date().toISOString().split('T')[0],
-          Order: row['Part No'] || 'UPLOADED',
-          PartyName: row['End-Customer'] || row['Customer'] || 'Imported Client',
-          NameOfItem: row['Name of Item'] || row['Description'] || 'Imported Item',
+          Date: row['Date'] || row['Due'] || '',
+          Order: row['Order'] || row['Ref No'] || row['Order No'] || row['Voucher No'] || row['Part No'] || '',
+          PartyName: party,
+          NameOfItem: itemName,
           MaterialCode: row['Material Code'] || '',
           PartNo: row['Part No'] || '',
-          Ordered: extractNum(row['Order']),
-          Balance: extractNum(row['Balar']) || extractNum(row['Balance']),
-          Rate: extractNum(row['R']) || extractNum(row['Rate']),
-          Discount: extractNum(row['Discou']) || 0,
-          Value: extractNum(row['Value']),
-          DueOn: row['Due'] || null,
+          Ordered: orderQty,
+          Balance: balQty,
+          Rate: extractNum(row['Rate'] || row['R'] || row['Price']),
+          Discount: extractNum(row['Discount'] || row['Discou']),
+          Value: val,
+          DueOn: row['Due on'] || row['Due'] || null,
           DueSerial: null,
-          Make: 'IMPORTED',
+          Make: '',
           MaterialGroup: '',
           Group: '',
           CustomerGroup: '',
@@ -208,13 +480,18 @@ export default function App() {
           POStatus: '',
           ExpDelivery: ''
         };
-      });
+      }).filter(Boolean) as SalesOrder[];
 
       if (parsed.length > 0) {
         setDynamicSO(parsed);
+        saveToFirebase('dynamicSO', parsed);
+        alert(`Successfully uploaded ${parsed.length} Sales Orders.`);
+      } else {
+        alert("No Sales Order data could be parsed from this file. Check headers.");
       }
     };
     reader.readAsBinaryString(file);
+    e.target.value = '';
   };
 
   const handlePOUpload = (e: ChangeEvent<HTMLInputElement>) => {
@@ -227,9 +504,32 @@ export default function App() {
       const wb = XLSX.read(bstr, { type: 'binary' });
       const wsname = wb.SheetNames[0];
       const ws = wb.Sheets[wsname];
-      const data = XLSX.utils.sheet_to_json(ws);
+      
+      const rawData = (XLSX.utils.sheet_to_json(ws, { header: 1 }) || []) as any[][];
+      if (!rawData || rawData.length === 0) return;
+      
+      let headerIdx = 0;
+      for (let i = 0; i < Math.min(rawData.length, 20); i++) {
+        const row = rawData[i];
+        if (row && row.some(cell => typeof cell === 'string' && (cell.includes("Party") || cell.includes("Name of Item") || cell.includes("Due")))) {
+          headerIdx = i;
+          break;
+        }
+      }
 
-      const parsed: PurchaseOrder[] = data.map((row: any) => {
+      const headers = rawData[headerIdx] || [];
+      const rows = rawData.slice(headerIdx + 1);
+
+      const parsed: PurchaseOrder[] = rows.map((rowArr: any[]) => {
+        const row: any = {};
+        headers.forEach((h, idx) => {
+          if (h && typeof h === 'string') {
+             // Remove any newlines or weird spaces from headers
+             const cleanHeader = h.replace(/\r?\n|\r/g, ' ').trim();
+             row[cleanHeader] = rowArr[idx];
+          }
+        });
+
         const extractNum = (val: any) => {
           if (typeof val === 'number') return val;
           if (!val) return 0;
@@ -237,27 +537,40 @@ export default function App() {
           return match ? parseFloat(match[0]) : 0;
         };
 
+        const party = String(row["Party's Name"] || row['Party Name'] || row['Supplier'] || '').trim();
+        const itemName = String(row['Name of Item'] || row['Item Name'] || row['Description'] || '').trim();
+        const orderQty = extractNum(row['Ordered'] || row['Ordered Qty'] || row['Qty']);
+        const balQty = extractNum(row['Balance'] || row['Balance Qty']);
+        const val = extractNum(row['Value'] || row['Amount']);
+
+        if (!party && !itemName) return null; // Skip empty rows
+
         return {
           Date: row['Date'] || '',
-          Order: row['Order'] || '',
-          PartyName: row["Party's Name"] || row['Party Name'] || '',
-          NameOfItem: row['Name of Item'] || '',
+          Order: row['Order'] || row['Ref No'] || row['Order No'] || row['Voucher No'] || '',
+          PartyName: party,
+          NameOfItem: itemName,
           MaterialCode: row['Material Code'] || '',
           PartNo: row['Part No'] || '',
-          Ordered: extractNum(row['Ordered']),
-          Balance: extractNum(row['Balance']),
-          Rate: extractNum(row['Rate']),
+          Ordered: orderQty,
+          Balance: balQty,
+          Rate: extractNum(row['Rate'] || row['Price']),
           Discount: extractNum(row['Discount']),
-          Value: extractNum(row['Value']),
+          Value: val,
           DueOn: row['Due on'] || row['Due'] || null
         };
-      });
+      }).filter(Boolean) as PurchaseOrder[];
 
       if (parsed.length > 0) {
         setDynamicPO(parsed);
+        saveToFirebase('dynamicPO', parsed);
+        alert(`Successfully uploaded ${parsed.length} PO records.`);
+      } else {
+        alert("No Purchase Order data could be parsed from this file. Check headers.");
       }
     };
     reader.readAsBinaryString(file);
+    e.target.value = '';
   };
 
   const handleStockUpload = (e: ChangeEvent<HTMLInputElement>) => {
@@ -290,6 +603,7 @@ export default function App() {
 
       if (parsed.length > 0) {
         setDynamicStock(parsed);
+        saveToFirebase('dynamicStock', parsed);
       }
     };
     reader.readAsBinaryString(file);
@@ -318,6 +632,8 @@ export default function App() {
 
       if (parsed.length > 0) {
         setDynamicMaterialMaster(parsed);
+        saveToFirebase('dynamicMaterialMaster', parsed);
+        alert(`Successfully uploaded ${parsed.length} Materials.`);
       }
     };
     reader.readAsBinaryString(file);
@@ -347,6 +663,7 @@ export default function App() {
 
       if (parsed.length > 0) {
         setDynamicCustomerMaster(parsed);
+        saveToFirebase('dynamicCustomerMaster', parsed);
       }
     };
     reader.readAsBinaryString(file);
@@ -362,10 +679,32 @@ export default function App() {
       const wb = XLSX.read(bstr, { type: 'binary' });
       const wsname = wb.SheetNames[0];
       const ws = wb.Sheets[wsname];
-      const data: any[] = XLSX.utils.sheet_to_json(ws);
+      
+      const rawData = (XLSX.utils.sheet_to_json(ws, { header: 1 }) || []) as any[][];
+      if (!rawData || rawData.length === 0) return;
+      
+      let headerIdx = 0;
+      for (let i = 0; i < Math.min(rawData.length, 20); i++) {
+        const row = rawData[i];
+        if (row && row.some(cell => typeof cell === 'string' && (cell.includes("Buyer") || cell.includes("Voucher No") || cell.includes("Particulars") || cell.includes("Description")))) {
+          headerIdx = i;
+          break;
+        }
+      }
+
+      const headers = rawData[headerIdx] || [];
+      const rows = rawData.slice(headerIdx + 1);
 
       const invoices: Invoice[] = [];
-      let currentInvoice: Invoice | null = null;
+      
+      // Tracking variables for forward-fill
+      let lastDate: any = '';
+      let lastBuyer: any = '';
+      let lastConsignee: any = '';
+      let lastVType = '';
+      let lastVNo = '';
+      let lastVRef = '';
+      let lastGSTIN = '';
 
       const extractNum = (val: any) => {
         if (typeof val === 'number') return val;
@@ -374,77 +713,86 @@ export default function App() {
         return match ? parseFloat(match[0]) : 0;
       };
 
-      data.forEach((row) => {
+      rows.forEach((rowArr: any[]) => {
+        const row: any = {};
+        headers.forEach((h, idx) => {
+          if (h && typeof h === 'string') {
+             const cleanHeader = h.replace(/\r?\n|\r/g, ' ').trim();
+             row[cleanHeader] = rowArr[idx];
+          }
+        });
+
         const date = row['Date'];
         const buyer = row['Buyer'];
+        const particulars = row['Particulars'] || row['Description'] || '';
         
-        if (date && buyer) {
-          // Start of a new invoice
-          currentInvoice = {
-            Date: String(date),
-            Buyer: String(buyer),
-            Consignee: String(row['Consignee'] || buyer),
-            VoucherNo: String(row['Voucher No.'] || ''),
-            VoucherRef: String(row['Voucher Ref. No.'] || ''),
-            Quantity: extractNum(row['Quantity']),
-            Value: extractNum(row['Value']),
-            Items: []
-          };
-          invoices.push(currentInvoice);
-        } else if (currentInvoice && row['Particulars']) {
-          // Add item to current invoice
-          currentInvoice.Items.push({
-            Particulars: String(row['Particulars']),
-            Quantity: extractNum(row['Quantity']),
-            Value: extractNum(row['Value'])
+        if (!particulars && !buyer && !date) return; // Skip empty rows
+
+        // Forward fill logic
+        if (date) lastDate = date;
+        if (buyer) lastBuyer = String(buyer).trim();
+        if (row['Consignee']) lastConsignee = String(row['Consignee']).trim();
+        else if (buyer) lastConsignee = String(buyer).trim();
+
+        if (row['Voucher Type']) lastVType = String(row['Voucher Type']).trim();
+        if (row['Voucher No.'] || row['Voucher No']) lastVNo = String(row['Voucher No.'] || row['Voucher No']).trim();
+        if (row['Voucher Ref. No.'] || row['Voucher Ref No']) lastVRef = String(row['Voucher Ref. No.'] || row['Voucher Ref No']).trim();
+        if (row['GSTIN/UIN'] || row['GSTIN']) lastGSTIN = String(row['GSTIN/UIN'] || row['GSTIN']).trim();
+
+        if (particulars) {
+          const qty = extractNum(row['Quantity'] || row['Qty']);
+          const val = extractNum(row['Value'] || row['Amount']);
+          if (qty <= 0 && val <= 0) return; 
+
+          let pText = String(particulars).trim();
+          if (!pText || pText.toLowerCase() === 'particulars') return;
+
+          // Skip if particulars look like common non-material accounts
+          const upperP = pText.toUpperCase();
+          if (upperP.includes('CGST') || upperP.includes('SGST') || upperP.includes('IGST') || upperP.includes('ROUNDING') || upperP.includes('DISCOUNT')) {
+             return;
+          }
+
+          // Remove customer name if it exists in particulars
+          if (lastBuyer) {
+            const escapedBuyer = lastBuyer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const buyerRegex = new RegExp(`^${escapedBuyer}|${escapedBuyer}$`, 'gi');
+            pText = pText.replace(buyerRegex, '').replace(/^[\s\W]+|[\s\W]+$/g, '').trim();
+          }
+
+          if (!pText || pText.length < 3 || pText.toLowerCase() === 'particulars') return; 
+          
+          invoices.push({
+            Date: lastDate,
+            Particulars: pText,
+            Buyer: lastBuyer,
+            Consignee: lastConsignee,
+            VoucherType: lastVType,
+            VoucherNo: lastVNo,
+            VoucherRef: lastVRef,
+            GSTIN: lastGSTIN,
+            Quantity: qty,
+            Value: val
           });
         }
       });
 
       if (invoices.length > 0) {
         setDynamicInvoices(invoices);
+        saveToFirebase('dynamicInvoices', invoices);
+        alert(`Successfully uploaded ${invoices.length} line items.`);
+      } else {
+        alert("No Invoice data could be parsed from this file. Check headers.");
       }
     };
     reader.readAsBinaryString(file);
+    e.target.value = '';
   };
   
-  // Dashboard Slicers
-  const [dMake, setDMake] = useState('');
-  const [dGroup, setDGroup] = useState('');
-  const [dCGroup, setDCGroup] = useState('');
-  const [dOrderType, setDOrderType] = useState('');
-
-  // Pending SO Slicers
-  const [soType, setSoType] = useState('');
-  const [soMake, setSoMake] = useState('');
-  const [soGroup, setSoGroup] = useState('');
-  const [soCust, setSoCust] = useState('');
-  const [soStatus, setSoStatus] = useState('');
-
-  // Customers Slicers
-  const [cGroup, setCGroup] = useState('');
-  const [cCGroup, setCCGroup] = useState('');
-  const [cCust, setCCust] = useState('');
-  const [cSearch, setCSearch] = useState('');
-
-  // Pending PO Slicers
-  const [poSearch, setPoSearch] = useState('');
-
-  // Stock Slicers
-  const [stockSearch, setStockSearch] = useState('');
-
-  // Material Master Slicers
-  const [materialSearch, setMaterialSearch] = useState('');
-
-  // Customer Master Slicers
-  const [customerMasterSearch, setCustomerMasterSearch] = useState('');
-
-  // Invoice Master Slicers
-  const [invoiceSearch, setInvoiceSearch] = useState('');
-
-  // DETAILS POPUP STATE
-  const [showSOPopup, setShowSOPopup] = useState<string | null>(null);
-  const [showInvPopup, setShowInvPopup] = useState<string | null>(null);
+   // Stock Slicers
+   // Material Master Slicers
+   // Customer Master Slicers
+   // Invoice Master Slicers
 
   const selectedCustomerData = useMemo(() => {
     if (!showSOPopup && !showInvPopup) return null;
@@ -454,7 +802,8 @@ export default function App() {
 
   // FIFO PROCESSING LOGIC
   const processedSO = useMemo(() => {
-    const CUTOFF_DATE = new Date('2026-04-30');
+    const now = new Date();
+    const CUTOFF_DATE = new Date(now.getFullYear(), now.getMonth() + 1, 0);
     
     // 1. Prepare Stock Map for FIFO
     const stockMap: Record<string, number> = {};
@@ -470,13 +819,15 @@ export default function App() {
 
     // 3. Enrich and Classify
     const sortedRaw = [...dynamicSO].sort((a, b) => {
-      const dbA = a.DueOn ? new Date(a.DueOn).getTime() : 0;
-      const dbB = b.DueOn ? new Date(b.DueOn).getTime() : 0;
+      const dtA = parseDateObj(a.DueOn);
+      const dtB = parseDateObj(b.DueOn);
+      const dbA = dtA ? dtA.getTime() : 0;
+      const dbB = dtB ? dtB.getTime() : 0;
       return dbA - dbB;
     });
 
     return sortedRaw.map(so => {
-      const dueDate = so.DueOn ? new Date(so.DueOn) : null;
+      const dueDate = parseDateObj(so.DueOn);
       const orderType = (dueDate && dueDate <= CUTOFF_DATE) ? 'Due' : 'Schedule';
       
       // Stock Allocation
@@ -526,12 +877,24 @@ export default function App() {
       if (dGroup && r.Group !== dGroup) return false;
       if (dCGroup && r.CustomerGroup !== dCGroup) return false;
       if (dOrderType && r.OrderType !== dOrderType) return false;
+      
+      if (searchTerm) {
+        const s = searchTerm.toLowerCase();
+        return (
+          r.PartyName.toLowerCase().includes(s) ||
+          r.NameOfItem.toLowerCase().includes(s) ||
+          r.Order.toLowerCase().includes(s)
+        );
+      }
       return true;
     });
-  }, [processedSO, dMake, dGroup, dCGroup, dOrderType]);
+  }, [processedSO, dMake, dGroup, dCGroup, dOrderType, searchTerm]);
 
   const dashboardStats = useMemo(() => {
     const total = filteredDashboardSO.reduce((s, r) => s + r.Value, 0);
+    const uniqueOrders = new Set(filteredDashboardSO.map(r => r.Order)).size;
+    const uniqueCustomers = new Set(filteredDashboardSO.map(r => r.PartyName)).size;
+
     const due = filteredDashboardSO.filter(r => r.OrderType === 'Due');
     const sched = filteredDashboardSO.filter(r => r.OrderType === 'Schedule');
     
@@ -543,16 +906,52 @@ export default function App() {
     const schedAvail = sched.filter(r => r.StockStatus === 'Available').reduce((s, r) => s + r.Value, 0);
     const schedArr = schedVal - schedAvail;
 
-    return { total, count: filteredDashboardSO.length, dueVal, dueAvail, dueArr, schedVal, schedAvail, schedArr };
-  }, [filteredDashboardSO]);
+    const totalPO = dynamicPO.reduce((s, p) => s + p.Value, 0);
+    const poCount = dynamicPO.length;
+    const uniquePO = new Set(dynamicPO.map(p => p.Order)).size;
+    const uniqueSuppliers = new Set(dynamicPO.map(p => p.PartyName)).size;
+
+    return { 
+      total, 
+      count: filteredDashboardSO.length, 
+      uniqueOrders, 
+      uniqueCustomers, 
+      dueVal, 
+      dueAvail, 
+      dueArr, 
+      schedVal, 
+      schedAvail, 
+      schedArr, 
+      totalPO, 
+      poCount,
+      uniquePO,
+      uniqueSuppliers
+    };
+  }, [filteredDashboardSO, dynamicPO]);
 
   const filteredSO = useMemo(() => {
     let list = processedSO.filter(r => {
       if (soType && r.OrderType !== soType) return false;
       if (soMake && r.Make !== soMake) return false;
       if (soGroup && r.Group !== soGroup) return false;
-      if (soCust && r.PartyName !== soCust) return false;
+      if (soCust) {
+        const s = soCust.toLowerCase();
+        if (
+          !(r.PartyName?.toLowerCase() || "").includes(s) && 
+          !(r.NameOfItem?.toLowerCase() || "").includes(s) && 
+          !(r.Order?.toLowerCase() || "").includes(s)
+        ) return false;
+      }
       if (soStatus && r.StockStatus !== soStatus) return false;
+
+      if (searchTerm) {
+        const s = searchTerm.toLowerCase();
+        return (
+          (r.PartyName?.toLowerCase() || "").includes(s) ||
+          (r.NameOfItem?.toLowerCase() || "").includes(s) ||
+          (r.Order?.toLowerCase() || "").includes(s)
+        );
+      }
       return true;
     });
     if (sortField) {
@@ -585,37 +984,53 @@ export default function App() {
 
   const customersList = useMemo(() => {
     const custMap: Record<string, any> = {};
+    const s = cSearch.toLowerCase();
+
+    // 1. Process Sales Orders
     processedSO.forEach(r => {
+      if (!r?.PartyName) return;
       if (cGroup && r.Group !== cGroup) return;
       if (cCGroup && r.CustomerGroup !== cCGroup) return;
-      if (cCust && r.PartyName !== cCust) return;
-      if (cSearch && !r.PartyName.toLowerCase().includes(cSearch.toLowerCase())) return;
-      
-      const k = r.PartyName;
-      if (!custMap[k]) {
-        custMap[k] = { name: k, group: r.Group, cgroup: r.CustomerGroup, dueVal: 0, schedVal: 0, total: 0 };
+
+      const matchesSearch = !cSearch || 
+        r.PartyName.toLowerCase().includes(s) || 
+        (r.Order || "").toLowerCase().includes(s) ||
+        (r.NameOfItem || "").toLowerCase().includes(s);
+
+      if (!matchesSearch) return;
+
+      if (!custMap[r.PartyName]) {
+        custMap[r.PartyName] = { name: r.PartyName, total: 0, dueVal: 0, schedVal: 0, group: r.Group || 'N/A', cgroup: r.CustomerGroup || 'N/A', invCount: 0, invVal: 0 };
       }
-      const c = custMap[k];
-      c.total += r.Value;
-      if (r.OrderType === 'Due') c.dueVal += r.Value; else c.schedVal += r.Value;
+      const c = custMap[r.PartyName];
+      c.total += r.Value || 0;
+      if (r.OrderType === 'Due') c.dueVal += r.Value || 0;
+      else if (r.OrderType === 'Schedule') c.schedVal += r.Value || 0;
     });
 
-    const invTotals: Record<string, { val: number; count: number }> = {};
-    dynamicInvoices.forEach(i => {
-      const k = i.Buyer.toLowerCase().trim();
-      if (!invTotals[k]) invTotals[k] = { val: 0, count: 0 };
-      invTotals[k].val += i.Value;
-      invTotals[k].count += 1;
+    // 2. Process Invoices
+    dynamicInvoices.forEach(inv => {
+      if (!inv?.Buyer) return;
+      const name = inv.Buyer;
+      
+      const matchesSearch = !cSearch || 
+        name.toLowerCase().includes(s) || 
+        (inv.VoucherNo || "").toLowerCase().includes(s) || 
+        (inv.VoucherRef || "").toLowerCase().includes(s) ||
+        (inv.Particulars || "").toLowerCase().includes(s);
+
+      if (!matchesSearch) return;
+
+      if (!custMap[name]) {
+        custMap[name] = { name, total: 0, dueVal: 0, schedVal: 0, group: 'N/A', cgroup: 'N/A', invCount: 0, invVal: 0 };
+      }
+      const c = custMap[name];
+      c.invCount++;
+      c.invVal += inv.Value || 0;
     });
 
-    return Object.values(custMap)
-      .map(c => ({
-        ...c,
-        invVal: invTotals[c.name.toLowerCase().trim()]?.val || 0,
-        invCount: invTotals[c.name.toLowerCase().trim()]?.count || 0,
-      }))
-      .sort((a, b) => b.total - a.total);
-  }, [processedSO, dynamicInvoices, cGroup, cCGroup, cCust, cSearch]);
+    return Object.values(custMap).sort((a: any, b: any) => (b.total + b.invVal) - (a.total + a.invVal));
+  }, [processedSO, dynamicInvoices, cGroup, cCGroup, cSearch]);
 
   const dashboardChartsData = useMemo(() => {
     // Total Pending Value Difference Chart (Horizontal Bar)
@@ -658,15 +1073,37 @@ export default function App() {
     });
 
     const top10Detailed = Object.values(custMap)
-      .sort((a, b) => b.total - a.total)
+      .sort((a, b) => {
+        if (sortField && a[sortField] !== undefined) {
+          const fieldA = a[sortField];
+          const fieldB = b[sortField];
+          if (typeof fieldA === 'number' && typeof fieldB === 'number') return sortDirection === 'asc' ? fieldA - fieldB : fieldB - fieldA;
+          return sortDirection === 'asc' ? String(fieldA).localeCompare(String(fieldB)) : String(fieldB).localeCompare(String(fieldA));
+        }
+        return b.total - a.total;
+      })
       .slice(0, 10);
 
     return { pendingTypeData, makeStackedData, top10Detailed };
-  }, [filteredDashboardSO, dashboardStats]);
+  }, [filteredDashboardSO, dashboardStats, sortField, sortDirection]);
 
   const filteredPOList = useMemo(() => {
-    let list = dynamicPO.filter(p => {
-      if (poSearch && !p.PartyName.toLowerCase().includes(poSearch.toLowerCase()) && !p.NameOfItem.toLowerCase().includes(poSearch.toLowerCase())) return false;
+    let list = dynamicPO.filter(r => {
+      const s = poSearch.toLowerCase();
+      if (poSearch && 
+          !(r.PartyName?.toLowerCase() || "").includes(s) && 
+          !(r.NameOfItem?.toLowerCase() || "").includes(s) && 
+          !(r.Order?.toLowerCase() || "").includes(s)
+      ) return false;
+      
+      if (searchTerm) {
+        const s = searchTerm.toLowerCase();
+        return (
+          (r.PartyName?.toLowerCase() || "").includes(s) ||
+          (r.NameOfItem?.toLowerCase() || "").includes(s) ||
+          (r.Order?.toLowerCase() || "").includes(s)
+        );
+      }
       return true;
     });
     if (sortField) {
@@ -678,11 +1115,23 @@ export default function App() {
       });
     }
     return list;
-  }, [dynamicPO, poSearch, sortField, sortDirection]);
+  }, [dynamicPO, poSearch, searchTerm, sortField, sortDirection]);
+
+  const poStats = useMemo(() => {
+    const total = filteredPOList.reduce((s, r) => s + r.Value, 0);
+    const uniqueOrders = new Set(filteredPOList.map(r => r.Order)).size;
+    const uniqueSuppliers = new Set(filteredPOList.map(r => r.PartyName)).size;
+    return { total, count: filteredPOList.length, uniqueOrders, uniqueSuppliers };
+  }, [filteredPOList]);
 
   const filteredStockList = useMemo(() => {
     let list = dynamicStock.filter(s => {
-      if (stockSearch && !s.Particulars.toLowerCase().includes(stockSearch.toLowerCase())) return false;
+      if (stockSearch && !(s.Particulars?.toLowerCase() || "").includes(stockSearch.toLowerCase())) return false;
+      
+      if (searchTerm) {
+        const srch = searchTerm.toLowerCase();
+        return s.Particulars.toLowerCase().includes(srch);
+      }
       return true;
     });
     if (sortField) {
@@ -694,7 +1143,7 @@ export default function App() {
       });
     }
     return list;
-  }, [dynamicStock, stockSearch, sortField, sortDirection]);
+  }, [dynamicStock, stockSearch, searchTerm, sortField, sortDirection]);
 
   const filteredMaterialList = useMemo(() => {
     let list = dynamicMaterialMaster.filter(m => {
@@ -716,7 +1165,7 @@ export default function App() {
 
   const filteredCustomerMasterList = useMemo(() => {
     let list = dynamicCustomerMaster.filter(c => {
-      if (customerMasterSearch && !c.CustomerName.toLowerCase().includes(customerMasterSearch.toLowerCase())) return false;
+      if (customerMasterSearch && !(c.CustomerName?.toLowerCase() || "").includes(customerMasterSearch.toLowerCase())) return false;
       return true;
     });
     if (sortField) {
@@ -732,7 +1181,13 @@ export default function App() {
 
   const filteredInvoiceList = useMemo(() => {
     let list = dynamicInvoices.filter(i => {
-      if (invoiceSearch && !i.Buyer.toLowerCase().includes(invoiceSearch.toLowerCase()) && !i.VoucherNo.toLowerCase().includes(invoiceSearch.toLowerCase())) return false;
+      const s = invoiceSearch.toLowerCase();
+      if (invoiceSearch && 
+          !(i.Buyer?.toLowerCase() || "").includes(s) && 
+          !(i.VoucherNo?.toLowerCase() || "").includes(s) && 
+          !(i.VoucherRef?.toLowerCase() || "").includes(s) &&
+          !(i.Particulars?.toLowerCase() || "").includes(s)
+      ) return false;
       return true;
     });
     if (sortField) {
@@ -761,10 +1216,13 @@ export default function App() {
         <div className="flex items-center justify-between mb-8 px-2">
           {!sidebarCollapsed && (
             <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center shadow-lg shadow-primary/20">
-                <Package className="w-5 h-5 text-white" />
+              <div className="w-12 h-12 rounded-xl bg-white flex items-center justify-center shadow-sm border border-border-custom overflow-hidden p-1">
+                <img src={logo} alt="Logo" className="w-full h-full object-contain" />
               </div>
-              <h1 className="text-lg font-bold tracking-tight text-text-main uppercase">Portfolio</h1>
+              <h1 className="text-[12px] font-black tracking-tight text-text-main leading-tight">
+                SIDDHI KABEL CORPORATION<br/>
+                <span className="text-[10px] text-primary opacity-80 uppercase tracking-widest">Pending PO Review</span>
+              </h1>
             </div>
           )}
           <button 
@@ -784,7 +1242,7 @@ export default function App() {
             { id: 'material-master', label: 'Material Master', icon: FileText },
             { id: 'customer-master', label: 'Customer Master', icon: Users },
             { id: 'invoices', label: 'Sales Invoices', icon: FileText },
-            { id: 'customers', label: 'Dashboard Analysis', icon: TrendingUp },
+            { id: 'customers', label: 'Customer Analysis', icon: TrendingUp },
           ].map(tab => (
             <button
               key={tab.id}
@@ -808,8 +1266,8 @@ export default function App() {
              <div className="p-4 bg-surface2 rounded-2xl mb-4 border border-border-custom">
                 <div className="text-[10px] font-bold text-text-muted uppercase mb-2 tracking-widest">Database Sync</div>
                 <div className="flex items-center gap-2">
-                   <div className="w-2 h-2 rounded-full bg-avail animate-pulse" />
-                   <span className="text-xs font-bold font-mono">LIVE_FEED_01</span>
+                   <div className={cn("w-2 h-2 rounded-full", isSyncing ? "bg-primary animate-pulse" : "bg-avail")} />
+                   <span className="text-xs font-bold font-mono">{isSyncing ? "SYNCING..." : "LIVE_FEED_01"}</span>
                 </div>
              </div>
            )}
@@ -827,11 +1285,80 @@ export default function App() {
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted transition-colors group-focus-within:text-primary" />
             <input 
               placeholder="Search across portfolio..." 
-              className="bg-surface2 rounded-full pl-11 pr-6 py-2.5 text-sm w-[380px] border border-transparent focus:border-primary focus:bg-surface outline-none transition-all"
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              className="bg-surface2 rounded-full pl-11 pr-6 py-2.5 text-sm w-[380px] border border-transparent focus:border-primary focus:bg-white outline-none transition-all shadow-sm focus:shadow-md"
             />
           </div>
 
           <div className="flex items-center gap-6">
+             <div className="relative" ref={uploadMenuRef}>
+               <button 
+                 onClick={() => setShowUploadMenu(!showUploadMenu)}
+                 className="flex items-center gap-2 bg-primary text-white px-5 py-2.5 rounded-xl text-xs font-bold shadow-lg shadow-primary/20 transition-all hover:bg-primary/90 active:scale-95"
+               >
+                 <Upload className="w-4 h-4" /> UPLOAD EXCEL
+               </button>
+               
+               <AnimatePresence>
+                 {showUploadMenu && (
+                   <motion.div 
+                     initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                     animate={{ opacity: 1, y: 0, scale: 1 }}
+                     exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                     className="absolute top-full right-0 mt-3 w-64 bg-white border border-border-custom rounded-2xl shadow-2xl z-50 py-3 overflow-hidden origin-top-right"
+                   >
+                     <div className="px-4 py-2 mb-1">
+                        <div className="text-[10px] font-black text-text-muted uppercase tracking-widest">Select Data Type</div>
+                     </div>
+                     <button 
+                       onClick={() => { fileInputRef.current?.click(); setShowUploadMenu(false); }}
+                       className="w-full px-4 py-2.5 text-left text-[13px] font-bold text-text-main hover:bg-slate-50 flex items-center gap-3 transition-colors border-l-4 border-l-transparent hover:border-l-primary"
+                     >
+                       <ClipboardList className="w-4 h-4 text-primary" />
+                       <span>Sales Orders (SO)</span>
+                     </button>
+                     <button 
+                       onClick={() => { fileInputPORef.current?.click(); setShowUploadMenu(false); }}
+                       className="w-full px-4 py-2.5 text-left text-[13px] font-bold text-text-main hover:bg-slate-50 flex items-center gap-3 transition-colors border-l-4 border-l-transparent hover:border-l-primary"
+                     >
+                       <PackageCheck className="w-4 h-4 text-primary" />
+                       <span>Purchase Orders (PO)</span>
+                     </button>
+                     <button 
+                       onClick={() => { fileInputStockRef.current?.click(); setShowUploadMenu(false); }}
+                       className="w-full px-4 py-2.5 text-left text-[13px] font-bold text-text-main hover:bg-slate-50 flex items-center gap-3 transition-colors border-l-4 border-l-transparent hover:border-l-primary"
+                     >
+                       <Package className="w-4 h-4 text-primary" />
+                       <span>Stock Inventory</span>
+                     </button>
+                     <div className="h-px bg-border-custom my-2 mx-4" />
+                     <button 
+                       onClick={() => { fileInputMaterialRef.current?.click(); setShowUploadMenu(false); }}
+                       className="w-full px-4 py-2.5 text-left text-[13px] font-bold text-text-main hover:bg-slate-50 flex items-center gap-3 transition-colors border-l-4 border-l-transparent hover:border-l-text-muted"
+                     >
+                       <FileText className="w-4 h-4 text-text-muted" />
+                       <span>Material Master</span>
+                     </button>
+                     <button 
+                       onClick={() => { fileInputCustomerRef.current?.click(); setShowUploadMenu(false); }}
+                       className="w-full px-4 py-2.5 text-left text-[13px] font-bold text-text-main hover:bg-slate-50 flex items-center gap-3 transition-colors border-l-4 border-l-transparent hover:border-l-text-muted"
+                     >
+                       <Users className="w-4 h-4 text-text-muted" />
+                       <span>Customer Master</span>
+                     </button>
+                     <button 
+                       onClick={() => { fileInputInvoiceRef.current?.click(); setShowUploadMenu(false); }}
+                       className="w-full px-4 py-2.5 text-left text-[13px] font-bold text-text-main hover:bg-slate-50 flex items-center gap-3 transition-colors border-l-4 border-l-transparent hover:border-l-text-muted"
+                     >
+                       <FileText className="w-4 h-4 text-text-muted" />
+                       <span>Sales Invoices</span>
+                     </button>
+                   </motion.div>
+                 )}
+               </AnimatePresence>
+             </div>
+
              <div className="text-right hidden sm:block">
                <div className="text-[14px] font-bold text-text-main tracking-tight">Admin User</div>
                <div className="text-[11px] font-bold text-text-muted uppercase tracking-widest leading-none mt-0.5">Control Access</div>
@@ -891,20 +1418,37 @@ export default function App() {
                     </select>
                   </div>
 
-                  <button 
-                    onClick={() => { setDMake(''); setDGroup(''); setDOrderType(''); }}
-                    className="ml-auto bg-surface2 hover:bg-border-custom/50 p-2.5 rounded-xl transition-colors text-text-muted"
-                  >
-                    <Search className="w-4 h-4 rotate-45" />
-                  </button>
+                  <div className="flex items-center gap-2 ml-auto">
+                    <button 
+                      onClick={() => { setDMake(''); setDGroup(''); setDOrderType(''); setDCGroup(''); setSearchTerm(''); }}
+                      className="flex items-center gap-1.5 bg-white border border-border-custom text-text-muted px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider hover:bg-slate-50 active:scale-95 transition-all shadow-sm"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" /> RESET FILTERS
+                    </button>
+                  </div>
                 </div>
 
                 {/* KPI ROW */}
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                   <StatCard 
-                    title="Total Pending SO" 
+                    title="📦 SO Portfolio Summary" 
                     value={fmtCur(dashboardStats.total)} 
-                    subValue={<><ClipboardList className="w-3.5 h-3.5" /> {dashboardStats.count} Total Orders</>}
+                    details={[
+                      { label: 'Total Value', value: fmtCur(dashboardStats.total), color: 'text-text-main' },
+                      { label: 'No of lines pending', value: String(dashboardStats.count), color: 'text-text-muted' },
+                      { label: 'Total SO Pending (Uniq)', value: String(dashboardStats.uniqueOrders), color: 'text-primary' },
+                      { label: 'Uniq Customers', value: String(dashboardStats.uniqueCustomers), color: 'text-avail' },
+                    ]}
+                  />
+                  <StatCard 
+                    title="🚚 Open PO Summary" 
+                    value={fmtCur(dashboardStats.totalPO)} 
+                    details={[
+                      { label: 'Total Value', value: fmtCur(dashboardStats.totalPO), color: 'text-text-main' },
+                      { label: 'No of lines pending', value: String(dashboardStats.poCount), color: 'text-text-muted' },
+                      { label: 'Uniq PO Pending', value: String(dashboardStats.uniquePO), color: 'text-primary' },
+                      { label: 'Uniq Suppliers', value: String(dashboardStats.uniqueSuppliers), color: 'text-avail' },
+                    ]}
                   />
                   <StatCard 
                     title="🔴 Due (<= 30.04.2026)" 
@@ -936,7 +1480,12 @@ export default function App() {
                                <XAxis type="number" hide />
                                <YAxis dataKey="name" type="category" stroke="#64748b" fontSize={11} width={100} />
                                <Tooltip formatter={(v: any) => fmtCur(v)} cursor={{fill: 'transparent'}} />
-                               <Bar dataKey="value" radius={[0, 6, 6, 0]} barSize={40} />
+                               <Bar dataKey="value" radius={[0, 4, 4, 0]}>
+                                 <LabelList dataKey="value" position="right" formatter={(v: number) => fmtCur(v)} style={{ fontSize: '9px', fontWeight: 'bold', fill: '#64748b' }} />
+                                 {dashboardChartsData.pendingTypeData.map((entry: any, index: number) => (
+                                   <Cell key={`cell-${index}`} fill={index === 0 ? '#ff4d4f' : '#1890ff'} />
+                                 ))}
+                               </Bar>
                             </BarChart>
                          </ResponsiveContainer>
                       </div>
@@ -952,8 +1501,12 @@ export default function App() {
                                <YAxis stroke="#64748b" fontSize={11} tickFormatter={v => fmtCur(v)} />
                                <Tooltip formatter={(v: any) => fmtCur(v)} contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'}} />
                                <Legend verticalAlign="top" align="right" height={36} />
-                               <Bar dataKey="due" name="Due Value" fill="#ff4d4f" stackId="make" />
-                               <Bar dataKey="schedule" name="Schedule Value" fill="#1890ff" stackId="make" />
+                               <Bar dataKey="due" name="Due Value" fill="#ff4d4f" stackId="make">
+                                   <LabelList dataKey="due" position="center" formatter={(v: number) => v > 0 ? fmtCur(v) : ''} style={{ fontSize: '8px', fontWeight: 'bold', fill: '#fff' }} />
+                                </Bar>
+                                <Bar dataKey="schedule" name="Schedule Value" fill="#1890ff" stackId="make">
+                                   <LabelList dataKey="schedule" position="center" formatter={(v: number) => v > 0 ? fmtCur(v) : ''} style={{ fontSize: '8px', fontWeight: 'bold', fill: '#fff' }} />
+                                </Bar>
                             </BarChart>
                          </ResponsiveContainer>
                       </div>
@@ -964,6 +1517,12 @@ export default function App() {
                 <div className="bg-surface border border-border-custom shadow-sm overflow-hidden">
                   <div className="px-4 py-3 border-b border-border-custom bg-surface2/30 flex justify-between items-center text-[Cambria]">
                     <h3 className="text-[12px] font-black text-text-main uppercase tracking-tight">Top 10 Customers Pending SO Breakdown</h3>
+                    <button 
+                      onClick={() => exportToExcel(dashboardChartsData.top10Detailed, 'Top_10_Customers_Breakdown')}
+                      className="flex items-center gap-1.5 bg-text-main text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-wider shadow-md hover:bg-primary active:scale-95 transition-all"
+                    >
+                      <Download className="w-3 h-3" /> EXPORT REPORT
+                    </button>
                   </div>
                   <div className="overflow-x-auto scrollbar-custom">
                     <table className="excel-table">
@@ -979,7 +1538,7 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody>
-                        {dashboardChartsData.top10Detailed.map((c, i) => (
+                        {(dashboardChartsData.top10Detailed || []).map((c, i) => (
                           <tr key={i} className="group cursor-pointer" onClick={() => setShowSOPopup(c.name)}>
                             <td className="font-bold text-text-muted">{c.group}</td>
                             <td className="font-bold text-text-muted">{c.cgroup}</td>
@@ -1048,37 +1607,80 @@ export default function App() {
                       </select>
                     </div>
 
+                    <div className="flex flex-col gap-1.5 min-w-[120px]">
+                      <label className="text-[10px] font-bold text-text-muted uppercase px-1">Make</label>
+                      <select value={soMake} onChange={e => setSoMake(e.target.value)} className="bg-surface2 border border-border-custom rounded-xl px-4 py-2.5 text-xs font-semibold outline-none focus:border-primary">
+                        <option value="">All Makes</option>
+                        {META.makes.map(m => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    </div>
+
+                    <div className="flex flex-col gap-1.5 min-w-[120px]">
+                      <label className="text-[10px] font-bold text-text-muted uppercase px-1">Group</label>
+                      <select value={soGroup} onChange={e => setSoGroup(e.target.value)} className="bg-surface2 border border-border-custom rounded-xl px-4 py-2.5 text-xs font-semibold outline-none focus:border-primary">
+                        <option value="">All Groups</option>
+                        {META.groups.map(g => <option key={g} value={g}>{g}</option>)}
+                      </select>
+                    </div>
+
                     <div className="flex flex-col gap-1.5 flex-1 min-w-[240px]">
-                      <label className="text-[10px] font-bold text-text-muted uppercase px-1">Customer Search</label>
+                      <label className="text-[10px] font-bold text-text-muted uppercase px-1">Universal Search</label>
                       <div className="relative">
                         <Search className="absolute left-3.5 top-2.5 w-4 h-4 text-text-muted" />
                         <input 
-                          placeholder="Search customer name..." 
-                          value={soCust} 
-                          onChange={e => setSoCust(e.target.value)}
-                          className="pl-10 w-full bg-surface2 border border-border-custom rounded-xl px-4 py-2.5 text-xs font-semibold focus:border-primary outline-none"
-                        />
+                           placeholder="Search Customer / Item / Order No..." 
+                           value={soCust} 
+                           onChange={e => setSoCust(e.target.value)}
+                           className="pl-10 w-full bg-surface2 border border-border-custom rounded-xl px-4 py-2.5 text-xs font-semibold focus:border-primary outline-none"
+                         />
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 ml-auto self-start">
                       <button 
                         onClick={() => fileInputRef.current?.click()}
-                        className="flex items-center gap-2 bg-avail text-white px-5 py-2.5 rounded-xl text-xs font-bold shadow-lg hover:shadow-primary/20 transition-all hover:bg-avail/90"
+                        className="flex items-center gap-1.5 bg-avail text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-avail/90 active:scale-95 transition-all"
                       >
-                        <Upload className="w-4 h-4" /> UPLOAD
+                        <Upload className="w-3.5 h-3.5" /> UPLOAD
                       </button>
                       <button 
                         onClick={() => { if(confirm('Reset SO data?')) handleReset('so') }}
-                        className="flex items-center gap-2 bg-white border border-border-custom text-text-muted px-5 py-2.5 rounded-xl text-xs font-bold hover:bg-surface2 transition-all shadow-sm"
+                        className="flex items-center gap-1.5 bg-white border border-border-custom text-text-muted px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider hover:bg-surface2 active:scale-95 transition-all shadow-sm"
                       >
-                        <RefreshCw className="w-4 h-4" /> RESET
+                        <RefreshCw className="w-3.5 h-3.5" /> RESET
                       </button>
-                      <button className="flex items-center gap-2 bg-text-main text-white px-5 py-2.5 rounded-xl text-xs font-bold shadow-lg hover:shadow-primary/20 transition-all hover:bg-primary">
-                        <Download className="w-4 h-4" /> EXTRACT
+                      <button 
+                        onClick={() => {
+                          const exportData = filteredSO.map(r => ({
+                            "Due Date": fmtDate(r.DueOn || r.Date),
+                            "Voucher No": r.Order,
+                            "Customer Name": r.PartyName,
+                            "Item Description": r.NameOfItem,
+                            "Material Code": r.MaterialCode,
+                            "Pending Qty": r.Balance,
+                            "Rate": r.Rate,
+                            "Value": r.Value,
+                            "Allocation Status": r.StockStatus
+                          }));
+                          exportToExcel(exportData, 'Pending_SO_Report');
+                        }}
+                        className="flex items-center gap-1.5 bg-text-main text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-primary active:scale-95 transition-all"
+                      >
+                        <Download className="w-3.5 h-3.5" /> EXTRACT
                       </button>
                     </div>
                     <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".xlsx, .xls, .csv" />
+                  </div>
+
+                  <div className="bg-white border-x border-t border-border-custom px-6 py-4 flex justify-end gap-12 shadow-[0_-2px_10px_-4px_rgba(0,0,0,0.05)] rounded-t-2xl relative z-10">
+                      <div className="flex flex-col items-end">
+                         <div className="text-[9px] font-black text-text-muted uppercase tracking-widest mb-0.5">Total Bal Qty</div>
+                         <div className="text-sm font-black text-text-main">{fmtNum(filteredSO.reduce((s, r) => s + (r.Balance || 0), 0))}</div>
+                      </div>
+                      <div className="flex flex-col items-end">
+                         <div className="text-[9px] font-black text-primary uppercase tracking-widest mb-0.5">Total Market Value</div>
+                         <div className="text-sm font-black text-primary">{fmtCur(filteredSO.reduce((s, r) => s + (r.Value || 0), 0))}</div>
+                      </div>
                   </div>
 
                   {/* DATA GRID */}
@@ -1097,12 +1699,12 @@ export default function App() {
                               </tr>
                            </thead>
                            <tbody className="bg-white">
-                              {filteredSO.map((r, idx) => (
+                              {(filteredSO || []).map((r, idx) => (
                                 <tr key={idx} className="hover:bg-slate-50 transition-colors group">
                                   <td className={cn("font-bold whitespace-nowrap", r.OrderType === 'Due' ? "text-danger" : "text-primary")}>
                                      {fmtDate(r.DueOn || r.Date)}
                                   </td>
-                                  <td className="font-mono text-text-muted uppercase">#{r.Order.slice(-8)}</td>
+                                  <td className="font-mono text-text-muted uppercase">{r.Order}</td>
                                   <td className="font-black text-text-main uppercase group-hover:text-primary transition-colors cursor-pointer" onClick={() => setShowSOPopup(r.PartyName)}>
                                     {r.PartyName}
                                   </td>
@@ -1138,13 +1740,32 @@ export default function App() {
                 exit={{ opacity: 0, x: 10 }}
                 className="space-y-8"
               >
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                    <div className="bg-white border border-border-custom p-6 rounded-2xl shadow-sm">
+                      <div className="text-[10px] font-black text-text-muted uppercase tracking-widest mb-1">Total PO Value</div>
+                      <div className="text-2xl font-black text-text-main">{fmtCur(poStats.total)}</div>
+                    </div>
+                    <div className="bg-white border border-border-custom p-6 rounded-2xl shadow-sm">
+                      <div className="text-[10px] font-black text-text-muted uppercase tracking-widest mb-1">No of lines pending</div>
+                      <div className="text-2xl font-black text-text-main">{poStats.count}</div>
+                    </div>
+                    <div className="bg-white border border-border-custom p-6 rounded-2xl shadow-sm">
+                      <div className="text-[10px] font-black text-primary uppercase tracking-widest mb-1">Uniq PO Pending</div>
+                      <div className="text-2xl font-black text-primary">{poStats.uniqueOrders}</div>
+                    </div>
+                    <div className="bg-white border border-border-custom p-6 rounded-2xl shadow-sm">
+                      <div className="text-[10px] font-black text-avail uppercase tracking-widest mb-1">Uniq Suppliers</div>
+                      <div className="text-2xl font-black text-avail">{poStats.uniqueSuppliers}</div>
+                    </div>
+                  </div>
+
                   <div className="bg-surface border border-border-custom shadow-sm p-6 flex flex-wrap items-end gap-5">
                     <div className="flex flex-col gap-1.5 flex-1 min-w-[240px]">
-                      <label className="text-[10px] font-bold text-text-muted uppercase px-1">PO Analytical Search</label>
+                      <label className="text-[10px] font-bold text-text-muted uppercase px-1">Global PO Search</label>
                       <div className="relative">
                         <Search className="absolute left-3.5 top-2.5 w-4 h-4 text-text-muted" />
                         <input 
-                          placeholder="Search Party or Item..." 
+                          placeholder="Search Party / Item / PO No..." 
                           value={poSearch} 
                           onChange={e => setPoSearch(e.target.value)}
                           className="pl-10 w-full bg-surface2 border border-border-custom rounded-xl px-4 py-2.5 text-xs font-semibold focus:border-primary outline-none focus:bg-white transition-all"
@@ -1152,18 +1773,35 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 ml-auto self-start">
                       <button 
                         onClick={() => fileInputPORef.current?.click()}
-                        className="flex items-center gap-2 bg-avail text-white px-5 py-2.5 rounded-xl text-xs font-bold shadow-lg hover:shadow-primary/20 transition-all hover:bg-avail/90"
+                        className="flex items-center gap-1.5 bg-avail text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-avail/90 active:scale-95 transition-all"
                       >
-                        <Upload className="w-4 h-4" /> UPLOAD PO
+                        <Upload className="w-3.5 h-3.5" /> UPLOAD PO
                       </button>
                       <button 
                          onClick={() => { if(confirm('Reset PO data?')) handleReset('po') }}
-                         className="flex items-center gap-2 bg-white border border-border-custom text-text-muted px-5 py-2.5 rounded-xl text-xs font-bold hover:bg-slate-50 transition-all shadow-sm"
+                         className="flex items-center gap-1.5 bg-white border border-border-custom text-text-muted px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider hover:bg-slate-50 active:scale-95 transition-all shadow-sm"
                       >
-                         <RefreshCw className="w-4 h-4" /> RESET
+                         <RefreshCw className="w-3.5 h-3.5" /> RESET
+                      </button>
+                      <button 
+                        onClick={() => {
+                          const exportData = filteredPOList.map(r => ({
+                            "Date": r.Date,
+                            "PO No": r.Order,
+                            "Supplier Name": r.PartyName,
+                            "Item Description": r.NameOfItem,
+                            "Pending Qty": r.Balance,
+                            "Rate": r.Rate,
+                            "Value": r.Value
+                          }));
+                          exportToExcel(exportData, 'Pending_PO_Report');
+                        }}
+                        className="flex items-center gap-1.5 bg-text-main text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-primary active:scale-95 transition-all"
+                      >
+                        <Download className="w-3.5 h-3.5" /> EXPORT
                       </button>
                     </div>
                     <input type="file" ref={fileInputPORef} onChange={handlePOUpload} className="hidden" accept=".xlsx, .xls, .csv" />
@@ -1186,10 +1824,10 @@ export default function App() {
                               </tr>
                            </thead>
                            <tbody className="bg-white">
-                              {filteredPOList.map((p, idx) => (
+                              {(filteredPOList || []).map((p, idx) => (
                                 <tr key={idx} className="hover:bg-slate-50 transition-colors group">
                                   <td className="whitespace-nowrap">{fmtDate(p.Date)}</td>
-                                  <td className="font-mono text-text-muted uppercase">#{p.Order.slice(-8)}</td>
+                                  <td className="font-mono text-text-muted uppercase">{p.Order}</td>
                                   <td className="font-black text-text-main uppercase">{p.PartyName}</td>
                                   <td className="whitespace-normal leading-tight max-w-[200px]">
                                      <div className="font-bold text-text-main">{p.NameOfItem}</div>
@@ -1233,18 +1871,30 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 ml-auto self-start">
                       <button 
                         onClick={() => fileInputStockRef.current?.click()}
-                        className="flex items-center gap-2 bg-avail text-white px-5 py-2.5 rounded-xl text-xs font-bold shadow-lg hover:shadow-primary/20 transition-all hover:bg-avail/90"
+                        className="flex items-center gap-1.5 bg-avail text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-avail/90 active:scale-95 transition-all"
                       >
-                        <Upload className="w-4 h-4" /> UPLOAD STOCK
+                        <Upload className="w-3.5 h-3.5" /> UPLOAD STOCK
                       </button>
                       <button 
                          onClick={() => { if(confirm('Reset Inventory data?')) handleReset('stock') }}
-                         className="flex items-center gap-2 bg-white border border-border-custom text-text-muted px-5 py-2.5 rounded-xl text-xs font-bold hover:bg-slate-50 transition-all shadow-sm"
+                         className="flex items-center gap-1.5 bg-white border border-border-custom text-text-muted px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider hover:bg-slate-50 active:scale-95 transition-all shadow-sm"
                       >
-                         <RefreshCw className="w-4 h-4" /> RESET
+                         <RefreshCw className="w-3.5 h-3.5" /> RESET
+                      </button>
+                      <button 
+                        onClick={() => {
+                          const exportData = filteredStockList.map(r => ({
+                            "Item Description": r.Particulars,
+                            "Available Stock": r.Quantity
+                          }));
+                          exportToExcel(exportData, 'Stock_Inventory_Report');
+                        }}
+                        className="flex items-center gap-1.5 bg-text-main text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-primary active:scale-95 transition-all"
+                      >
+                        <Download className="w-3.5 h-3.5" /> EXPORT
                       </button>
                     </div>
                     <input type="file" ref={fileInputStockRef} onChange={handleStockUpload} className="hidden" accept=".xlsx, .xls, .csv" />
@@ -1262,7 +1912,7 @@ export default function App() {
                               </tr>
                            </thead>
                            <tbody className="bg-white">
-                              {filteredStockList.map((s, idx) => (
+                              {(filteredStockList || []).map((s, idx) => (
                                 <tr key={idx} className="hover:bg-slate-50 transition-colors group">
                                   <td className="font-black text-text-main uppercase whitespace-normal leading-tight max-w-[400px]">{s.Particulars}</td>
                                   <td className="text-right font-black text-text-main">{fmtNum(s.Quantity)}</td>
@@ -1311,18 +1961,32 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 ml-auto self-start">
                       <button 
                         onClick={() => fileInputMaterialRef.current?.click()}
-                        className="flex items-center gap-2 bg-avail text-white px-5 py-2.5 rounded-xl text-xs font-bold shadow-lg hover:shadow-primary/20 transition-all hover:bg-avail/90"
+                        className="flex items-center gap-1.5 bg-avail text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-avail/90 active:scale-95 transition-all"
                       >
-                        <Upload className="w-4 h-4" /> UPLOAD MASTER
+                        <Upload className="w-3.5 h-3.5" /> UPLOAD MASTER
                       </button>
                       <button 
                          onClick={() => { if(confirm('Reset Material Master?')) handleReset('material') }}
-                         className="flex items-center gap-2 bg-white border border-border-custom text-text-muted px-5 py-2.5 rounded-xl text-xs font-bold hover:bg-slate-50 transition-all shadow-sm"
+                         className="flex items-center gap-1.5 bg-white border border-border-custom text-text-muted px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider hover:bg-slate-50 active:scale-95 transition-all shadow-sm"
                       >
-                         <RefreshCw className="w-4 h-4" /> RESET
+                         <RefreshCw className="w-3.5 h-3.5" /> RESET
+                      </button>
+                      <button 
+                        onClick={() => {
+                          const exportData = filteredMaterialList.map(r => ({
+                            "Material Code": r.MaterialCode,
+                            "Material Name": r.MaterialName,
+                            "Group": r.Group,
+                            "Base Unit": r.BaseUnit
+                          }));
+                          exportToExcel(exportData, 'Material_Master_Report');
+                        }}
+                        className="flex items-center gap-1.5 bg-text-main text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-primary active:scale-95 transition-all"
+                      >
+                        <Download className="w-3.5 h-3.5" /> EXPORT
                       </button>
                     </div>
                     <input type="file" ref={fileInputMaterialRef} onChange={handleMaterialUpload} className="hidden" accept=".xlsx, .xls, .csv" />
@@ -1340,7 +2004,7 @@ export default function App() {
                               </tr>
                            </thead>
                            <tbody className="bg-white">
-                              {filteredMaterialList.map((m, idx) => (
+                              {(filteredMaterialList || []).map((m, idx) => (
                                 <tr key={idx} className="hover:bg-slate-50 transition-colors">
                                   <td className="font-black text-text-main uppercase whitespace-normal leading-tight max-w-[400px]">{m.Description}</td>
                                   <td className="font-mono text-text-muted">{m.PartNo}</td>
@@ -1376,18 +2040,32 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 ml-auto self-start">
                       <button 
                         onClick={() => fileInputCustomerRef.current?.click()}
-                        className="flex items-center gap-2 bg-avail text-white px-5 py-2.5 rounded-xl text-xs font-bold shadow-lg hover:shadow-primary/20 transition-all hover:bg-avail/90"
+                        className="flex items-center gap-1.5 bg-avail text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-avail/90 active:scale-95 transition-all"
                       >
-                        <Upload className="w-4 h-4" /> UPLOAD CSV
+                        <Upload className="w-3.5 h-3.5" /> UPLOAD CSV
                       </button>
                       <button 
                          onClick={() => { if(confirm('Reset Customer Master?')) handleReset('customer') }}
-                         className="flex items-center gap-2 bg-white border border-border-custom text-text-muted px-5 py-2.5 rounded-xl text-xs font-bold hover:bg-slate-50 transition-all shadow-sm"
+                         className="flex items-center gap-1.5 bg-white border border-border-custom text-text-muted px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider hover:bg-slate-50 active:scale-95 transition-all shadow-sm"
                       >
-                         <RefreshCw className="w-4 h-4" /> RESET
+                         <RefreshCw className="w-3.5 h-3.5" /> RESET
+                      </button>
+                      <button 
+                        onClick={() => {
+                          const exportData = filteredCustomerMasterList.map(r => ({
+                            "Customer Name": r.CustomerName,
+                            "Group": r.Group,
+                            "Status": r.Status,
+                            "Segment": r.CustomerGroup
+                          }));
+                          exportToExcel(exportData, 'Customer_Master_Report');
+                        }}
+                        className="flex items-center gap-1.5 bg-text-main text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-primary active:scale-95 transition-all"
+                      >
+                        <Download className="w-3.5 h-3.5" /> EXPORT
                       </button>
                     </div>
                     <input type="file" ref={fileInputCustomerRef} onChange={handleCustomerUpload} className="hidden" accept=".xlsx, .xls, .csv" />
@@ -1405,7 +2083,7 @@ export default function App() {
                               </tr>
                            </thead>
                            <tbody className="bg-white">
-                              {filteredCustomerMasterList.map((c, idx) => (
+                              {(filteredCustomerMasterList || []).map((c, idx) => (
                                 <tr key={idx} className="hover:bg-slate-50 transition-colors group cursor-pointer" onClick={() => setShowSOPopup(c.CustomerName)}>
                                   <td className="font-black text-text-main uppercase whitespace-normal leading-tight max-w-[300px]">{c.CustomerName}</td>
                                   <td className="font-bold text-text-muted">{c.Group}</td>
@@ -1427,7 +2105,6 @@ export default function App() {
                      </div>
                   </div>
               </motion.div>
-            )}
             )}
 
             {activeTab === 'invoices' && (
@@ -1452,12 +2129,40 @@ export default function App() {
                       </div>
                     </div>
 
-                    <button 
-                      onClick={() => fileInputInvoiceRef.current?.click()}
-                      className="flex items-center gap-2 bg-avail text-white px-5 py-2.5 rounded-xl text-xs font-bold shadow-lg hover:shadow-primary/20 transition-all hover:bg-avail/90"
-                    >
-                      <Upload className="w-4 h-4" /> UPLOAD INVOICE EXCEL
-                    </button>
+                    <div className="flex items-center gap-2 ml-auto self-start">
+                      <button 
+                        onClick={() => fileInputInvoiceRef.current?.click()}
+                        className="flex items-center gap-1.5 bg-avail text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-avail/90 active:scale-95 transition-all"
+                      >
+                        <Upload className="w-3.5 h-3.5" /> UPLOAD INVOICE
+                      </button>
+                      <button 
+                        onClick={() => { if(confirm('Reset Invoice data?')) handleReset('invoice') }}
+                        className="flex items-center gap-1.5 bg-white border border-border-custom text-text-muted px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider hover:bg-surface2 active:scale-95 transition-all shadow-sm"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" /> RESET
+                      </button>
+                      <button 
+                        onClick={() => {
+                          const exportData = filteredInvoiceList.map(r => ({
+                            "Date": r.Date,
+                            "Particulars": r.Particulars,
+                            "Buyer": r.Buyer,
+                            "Consignee": r.Consignee,
+                            "Voucher Type": r.VoucherType,
+                            "Voucher No": r.VoucherNo,
+                            "Voucher Ref": r.VoucherRef,
+                            "GSTIN": r.GSTIN,
+                            "Quantity": r.Quantity,
+                            "Value": r.Value
+                          }));
+                          exportToExcel(exportData, 'Sales_Invoice_Report');
+                        }}
+                        className="flex items-center gap-1.5 bg-text-main text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-primary active:scale-95 transition-all"
+                      >
+                        <Download className="w-3.5 h-3.5" /> EXPORT
+                      </button>
+                    </div>
                     <input 
                       type="file" 
                       ref={fileInputInvoiceRef} 
@@ -1465,57 +2170,47 @@ export default function App() {
                       className="hidden" 
                       accept=".xlsx, .xls, .csv" 
                     />
-
-                    <button className="flex items-center gap-2 bg-text-main text-white px-5 py-2.5 rounded-xl text-xs font-bold shadow-lg hover:shadow-primary/20 transition-all hover:bg-primary">
-                      <Download className="w-4 h-4" /> EXPORT
-                    </button>
                   </div>
 
                   <div className="bg-surface border border-border-custom rounded-2xl overflow-hidden shadow-sm">
                      <div className="overflow-x-auto scrollbar-custom max-h-[calc(100vh-320px)]">
-                        <table className="w-full text-[12px] border-separate border-spacing-0">
-                           <thead className="sticky top-0 bg-white z-10 font-bold uppercase tracking-wider text-text-muted border-b border-border-custom">
+                        <table className="excel-table">
+                           <thead>
                               <tr>
-                                 <th className="px-6 py-4 bg-white border-b border-border-custom text-left">Date & Voucher</th>
-                                 <th className="px-4 py-4 bg-white border-b border-border-custom text-left">Buyer / Party Details</th>
-                                 <th className="px-4 py-4 bg-white border-b border-border-custom text-right">Qty</th>
-                                 <th className="px-6 py-4 bg-white border-b border-border-custom text-right text-primary font-black">Total Value</th>
+                                 <th className="whitespace-nowrap">Date</th>
+                                 <th className="min-w-[200px]">Particulars</th>
+                                 <th>Buyer</th>
+                                 <th>Consignee</th>
+                                 <th className="whitespace-nowrap">Voucher Type</th>
+                                 <th className="whitespace-nowrap">Voucher No.</th>
+                                 <th className="whitespace-nowrap">Voucher Ref. No.</th>
+                                 <th className="whitespace-nowrap">GSTIN/UIN</th>
+                                 <th className="text-right">Quantity</th>
+                                 <th className="text-right">Value</th>
                               </tr>
                            </thead>
                            <tbody className="bg-white">
-                              {filteredInvoiceList.map((inv, idx) => (
-                                <React.Fragment key={idx}>
-                                  <tr className="bg-slate-50/50 hover:bg-slate-100/50 transition-colors">
-                                    <td className="px-6 py-4">
-                                      <div className="font-bold text-text-main">{inv.Date}</div>
-                                      <div className="text-[10px] text-primary font-black uppercase tracking-tighter">{inv.VoucherNo}</div>
-                                    </td>
-                                    <td className="px-4 py-4">
-                                      <div className="font-black text-text-main uppercase text-[13px]">{inv.Buyer}</div>
-                                      <div className="text-[10px] text-text-muted font-mono truncate max-w-sm">{inv.VoucherRef}</div>
-                                    </td>
-                                    <td className="px-4 py-4 text-right font-black text-text-main">{fmtNum(inv.Quantity)}</td>
-                                    <td className="px-6 py-4 text-right font-black text-primary text-sm">{fmtCur(inv.Value)}</td>
-                                  </tr>
-                                  {inv.Items.map((item, idy) => (
-                                    <tr key={`${idx}-${idy}`} className="group border-b border-border-custom/30 last:border-b-0">
-                                      <td className="px-6 py-2.5"></td>
-                                      <td className="px-4 py-2.5 text-text-muted text-[11px] font-medium pl-10 border-l-2 border-primary/20 bg-slate-50/20">
-                                        {item.Particulars}
-                                      </td>
-                                      <td className="px-4 py-2.5 text-right text-text-muted text-[11px] opacity-70">
-                                        {fmtNum(item.Quantity)}
-                                      </td>
-                                      <td className="px-6 py-2.5 text-right text-text-muted text-[11px] italic">
-                                        {fmtCur(item.Value)}
-                                      </td>
-                                    </tr>
-                                  ))}
-                                </React.Fragment>
+                              {(filteredInvoiceList || []).map((inv, idx) => (
+                                <tr key={idx} className="hover:bg-slate-50 transition-colors group">
+                                  <td className="whitespace-nowrap text-text-muted">{fmtDate(inv.Date)}</td>
+                                  <td className="font-bold text-text-main">{inv.Particulars}</td>
+                                  <td className="uppercase text-[11px] font-bold">{inv.Buyer}</td>
+                                  <td className="uppercase text-[11px] font-bold text-text-muted">{inv.Consignee}</td>
+                                  <td className="text-center">
+                                    <span className="px-1.5 py-0.5 rounded bg-slate-100 text-text-muted text-[9px] font-black uppercase border border-border-custom">
+                                      {inv.VoucherType}
+                                    </span>
+                                  </td>
+                                  <td className="font-mono text-primary font-black uppercase">{inv.VoucherNo}</td>
+                                  <td className="font-mono text-text-muted text-[10px]">{inv.VoucherRef}</td>
+                                  <td className="font-mono text-text-muted text-[10px] uppercase">{inv.GSTIN}</td>
+                                  <td className="text-right font-black text-text-main">{fmtNum(inv.Quantity)}</td>
+                                  <td className="text-right font-black text-primary">{fmtCur(inv.Value)}</td>
+                                </tr>
                               ))}
                               {filteredInvoiceList.length === 0 && (
                                  <tr>
-                                    <td colSpan={4} className="py-20 text-center text-text-muted italic font-bold">
+                                    <td colSpan={10} className="py-20 text-center text-text-muted italic font-bold">
                                        No invoices uploaded. Upload your sales register to track billing history.
                                     </td>
                                  </tr>
@@ -1536,11 +2231,11 @@ export default function App() {
                 className="space-y-8"
               >
                   <div className="flex justify-between items-center bg-surface border border-border-custom rounded-2xl p-6 shadow-sm">
-                     <div className="flex gap-4 flex-1 max-w-2xl">
+                     <div className="flex gap-4 flex-1 max-w-3xl items-center">
                         <div className="relative flex-1">
                           <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
                           <input 
-                            placeholder="Find specific customer by name..." 
+                            placeholder="Search Customer / Order ID / Invoice No / PO No..." 
                             className="bg-surface2 rounded-2xl pl-12 pr-6 py-3 text-sm w-full outline-none focus:ring-2 focus:ring-primary/20 transition-all font-medium border border-transparent focus:border-primary"
                             value={cSearch}
                             onChange={e => setCSearch(e.target.value)}
@@ -1551,71 +2246,91 @@ export default function App() {
                           onChange={e => setCGroup(e.target.value)}
                           className="bg-surface2 border border-border-custom rounded-2xl px-6 py-3 text-sm font-bold text-text-main"
                         >
-                          <option value="">Global Regions</option>
+                          <option value="">All Regions</option>
                           {META.groups.map(g => <option key={g} value={g}>{g}</option>)}
                         </select>
+                        <button 
+                          onClick={() => { setCSearch(''); setCGroup(''); setCCGroup(''); setSearchTerm(''); }}
+                          className="flex items-center gap-1.5 bg-white border border-border-custom text-text-muted px-4 py-3 rounded-2xl text-[10px] font-black uppercase tracking-wider hover:bg-slate-50 active:scale-95 transition-all shadow-sm h-full"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" /> RESET
+                        </button>
                      </div>
+                      <button 
+                         onClick={() => {
+                           const exportData = customersList.map(c => ({
+                             "Customer Name": c.name,
+                             "Total Pending SO": c.total,
+                             "Due Orders": c.dueVal,
+                             "Schedule Orders": c.schedVal,
+                             "Total Invoiced": c.invVal
+                           }));
+                           exportToExcel(exportData, 'Customer_Analysis_Report');
+                         }}
+                         className="flex items-center gap-2 bg-text-main text-white px-6 py-3 rounded-2xl text-xs font-bold shadow-lg hover:shadow-primary/20 transition-all hover:bg-primary"
+                       >
+                         <Download className="w-4 h-4" /> EXPORT REPORT
+                       </button>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-6">
-                    {customersList.map(c => (
-                      <div 
-                        key={c.name}
-                        onClick={() => setSelectedCustomer(c.name)}
-                        className="bg-surface border border-border-custom rounded-3xl p-8 flex flex-col justify-between hover:shadow-2xl hover:shadow-slate-200 transition-all duration-300 transform hover:-translate-y-1 group relative overflow-hidden"
-                      >
-                         <div className="absolute -right-4 -bottom-4 w-32 h-32 bg-slate-50 rounded-full group-hover:scale-150 transition-transform duration-500 -z-10" />
-                         
-                         <div className="space-y-2">
-                           <div className="w-10 h-10 rounded-2xl bg-surface2 flex items-center justify-center mb-4 group-hover:bg-primary group-hover:text-white transition-colors">
-                              <Users className="w-5 h-5 text-text-muted group-hover:text-white" />
-                           </div>
-                           <h4 className="text-base font-black text-text-main leading-tight group-hover:text-primary transition-colors min-h-[48px] line-clamp-2 uppercase tracking-tight">{c.name}</h4>
-                           <div className="flex items-center gap-2">
-                              <div className="w-1.5 h-1.5 rounded-full bg-primary" />
-                              <span className="text-[10px] font-black uppercase text-text-muted tracking-widest">{c.cgroup || c.group}</span>
-                           </div>
-                         </div>
-
-                         <div className="mt-8 pt-8 border-t border-border-custom/50 space-y-4">
-                            <div>
-                               <div className="text-[10px] font-black text-text-muted uppercase tracking-wider mb-1 flex justify-between">
-                                 Portfolio Value
-                                 <span className="text-text-main font-mono">{fmtCur(c.total)}</span>
-                               </div>
-                               <div className="w-full h-1.5 bg-surface2 rounded-full overflow-hidden flex">
-                                  <div className="h-full bg-due" style={{ width: `${(c.dueVal/c.total)*100}%` }} />
-                                  <div className="h-full bg-sched" style={{ width: `${(c.schedVal/c.total)*100}%` }} />
-                               </div>
-                            </div>
-                            
-                            <div className="flex justify-between items-end">
-                               <div 
-                                onClick={(e) => {
-                                  if (c.invVal > 0) {
-                                    e.stopPropagation();
-                                    setSelectedInvoiceCust(c.name);
-                                  }
-                                }}
-                                className="text-xs font-bold text-primary hover:underline cursor-pointer flex items-center gap-1"
-                               >
-                                  {c.invCount} Records <ArrowUpRight className="w-3 h-3" />
-                               </div>
-                               <div className="text-right">
-                                  <div className="text-[10px] font-bold text-text-muted uppercase leading-none mb-1">Invoiced</div>
-                                  <div className="text-md font-black text-text-main leading-none">{c.invVal > 0 ? fmtCur(c.invVal) : '₹0.00'}</div>
-                               </div>
-                            </div>
-                         </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  {customersList.length === 0 && (
-                     <div className="bg-surface2/30 rounded-3xl border-2 border-dashed border-border-custom py-32 text-center text-text-muted font-bold italic tracking-wider">
-                        No clients located within specified search parameters.
+                  <div className="bg-surface border border-border-custom rounded-2xl overflow-hidden shadow-sm">
+                     <div className="overflow-x-auto scrollbar-custom max-h-[calc(100vh-320px)]">
+                        <table className="excel-table">
+                           <thead>
+                              <tr>
+                                 <th>Customer Name</th>
+                                 <th className="text-right">Total Pending SO</th>
+                                 <th className="text-right">Due Orders</th>
+                                 <th className="text-right">Schedule Orders</th>
+                                 <th className="text-right">Total Invoiced</th>
+                                 <th className="text-center">Action</th>
+                              </tr>
+                           </thead>
+                           <tbody className="bg-white">
+                              {(customersList || []).map((c, idx) => (
+                                <tr key={idx} className="hover:bg-slate-50 transition-colors group">
+                                  <td className="font-black text-text-main uppercase text-[13px]">{c.name}</td>
+                                  <td className="text-right font-black text-primary">
+                                     <button 
+                                      onClick={() => setShowSOPopup(c.name)}
+                                      className="hover:underline hover:text-primary/80 transition-all"
+                                     >
+                                       {fmtCur(c.total)}
+                                     </button>
+                                  </td>
+                                  <td className="text-right font-bold text-danger">{fmtCur(c.dueVal)}</td>
+                                  <td className="text-right font-bold text-text-muted">{fmtCur(c.schedVal)}</td>
+                                  <td className="text-right font-black text-avail">
+                                     <button 
+                                      onClick={() => setShowInvPopup(c.name)}
+                                      className="hover:underline hover:text-avail/80 transition-all"
+                                     >
+                                       {fmtCur(c.invVal)}
+                                     </button>
+                                  </td>
+                                  <td className="text-center">
+                                    <div className="flex justify-center gap-2">
+                                      <button onClick={() => setShowSOPopup(c.name)} className="p-1.5 rounded-lg bg-primary/10 text-primary hover:bg-primary hover:text-white transition-all" title="View SO Report">
+                                        <ClipboardList className="w-4 h-4" />
+                                      </button>
+                                      <button onClick={() => setShowInvPopup(c.name)} className="p-1.5 rounded-lg bg-avail/10 text-avail hover:bg-avail hover:text-white transition-all" title="View Invoice Report">
+                                        <FileText className="w-4 h-4" />
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                              {customersList.length === 0 && (
+                                 <tr>
+                                    <td colSpan={6} className="py-20 text-center text-text-muted italic font-bold">
+                                       No customer data located within specified filters.
+                                    </td>
+                                 </tr>
+                              )}
+                           </tbody>
+                        </table>
                      </div>
-                  )}
+                  </div>
               </motion.div>
             )}
           </AnimatePresence>
@@ -1635,11 +2350,11 @@ export default function App() {
             />
             <motion.div 
               initial={{ scale: 0.95, opacity: 0, y: 20 }} animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ scale: 0.95, opacity: 0, y: 20 }}
-              className="bg-surface w-full max-w-6xl max-h-[90vh] overflow-hidden rounded-[32px] shadow-2xl relative flex flex-col border border-border-custom"
+              className="bg-surface w-[98vw] h-[98vh] overflow-hidden rounded-2xl shadow-2xl relative flex flex-col border border-border-custom"
             >
               <div className="p-6 border-b border-border-custom bg-surface2/30 flex justify-between items-center shrink-0">
                 <div className="flex items-center gap-6">
-                  <div className="w-14 h-14 bg-primary rounded-2xl flex items-center justify-center shadow-lg shadow-primary/20">
+                  <div className="w-14 h-14 bg-primary rounded-2xl flex items-center justify-center shadow-lg shadow-primary/20 shrink-0">
                     <ClipboardList className="w-7 h-7 text-white" />
                   </div>
                   <div>
@@ -1653,19 +2368,53 @@ export default function App() {
                        </span>
                     </div>
                   </div>
+                  <div className="ml-10 relative">
+                     <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
+                     <input 
+                      placeholder="Search items / Ref No..."
+                      value={popupSearch}
+                      onChange={e => setPopupSearch(e.target.value)}
+                      className="bg-white border border-border-custom rounded-xl pl-10 pr-4 py-2 text-xs font-bold outline-none focus:border-primary w-64 shadow-sm"
+                     />
+                   </div>
                 </div>
-                <button 
-                  onClick={() => setShowSOPopup(null)}
-                  className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors border border-border-custom bg-white shadow-sm"
-                >
-                  <Search className="w-5 h-5 text-text-muted rotate-45" />
-                </button>
+                <div className="flex items-center gap-4">
+                   <button 
+                    onClick={() => {
+                      const s = cSearch.toLowerCase();
+                      const exportData = processedSO
+                        .filter(r => r.PartyName === showSOPopup)
+                        .filter(r => activeTab !== 'customers' || !cSearch || (r.Order || "").toLowerCase().includes(s) || (r.NameOfItem || "").toLowerCase().includes(s))
+                        .map(r => ({
+                          "Due Date": fmtDate(r.DueOn || r.Date),
+                          "Ref No": r.Order,
+                          "Item Description": r.NameOfItem,
+                          "Qty": r.Balance,
+                          "Value": r.Value,
+                          "Allocation Status": r.StockStatus
+                        }));
+                      exportToExcel(exportData, `${showSOPopup}_Pending_SO`);
+                    }}
+                    className="flex items-center gap-1.5 bg-white border border-border-custom text-text-muted px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-wider hover:bg-slate-50 transition-all shadow-sm"
+                   >
+                     <Download className="w-3.5 h-3.5" /> EXPORT EXCEL
+                   </button>
+                   <button 
+                    onClick={() => setShowSOPopup(null)}
+                    className="w-10 h-10 rounded-full hover:bg-danger/10 text-danger flex items-center justify-center transition-all border border-danger/20 bg-white shadow-sm hover:scale-110"
+                   >
+                    <X className="w-5 h-5" />
+                   </button>
+                </div>
               </div>
 
               <div className="flex-1 overflow-y-auto scrollbar-custom p-8 bg-slate-50/20">
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
                    {(() => {
-                      const items = processedSO.filter(r => r.PartyName === showSOPopup);
+                      const s = cSearch.toLowerCase();
+                      const items = processedSO
+                         .filter(r => r.PartyName === showSOPopup)
+                         .filter(r => activeTab !== 'customers' || !cSearch || (r.Order || "").toLowerCase().includes(s) || (r.NameOfItem || "").toLowerCase().includes(s));
                       const total = items.reduce((s, r) => s + r.Value, 0);
                       const dueVal = items.filter(r => r.OrderType === 'Due').reduce((s, r) => s + r.Value, 0);
                       const availVal = items.filter(r => r.StockStatus === 'Available').reduce((s, r) => s + r.Value, 0);
@@ -1692,7 +2441,7 @@ export default function App() {
                    <table className="w-full text-left text-[12px] border-separate border-spacing-0">
                       <thead className="sticky top-0 bg-white z-10 font-black uppercase text-[10px] text-text-muted">
                          <tr>
-                            <th className="px-6 py-4 border-b border-border-custom">Date</th>
+                            <th className="px-6 py-4 border-b border-border-custom text-avail">Due Date</th>
                             <th className="px-4 py-4 border-b border-border-custom">Ref No</th>
                             <th className="px-4 py-4 border-b border-border-custom">Item Description</th>
                             <th className="px-4 py-4 border-b border-border-custom text-right">Qty</th>
@@ -1701,7 +2450,14 @@ export default function App() {
                          </tr>
                       </thead>
                       <tbody className="divide-y divide-border-custom">
-                         {processedSO.filter(r => r.PartyName === showSOPopup).sort((a,b) => new Date(a.DueOn || 0).getTime() - new Date(b.DueOn || 0).getTime()).map((r, i) => (
+                         {(() => {
+                            const s = cSearch.toLowerCase();
+                            return processedSO
+                              .filter(r => r.PartyName === showSOPopup)
+                              .filter(r => activeTab !== 'customers' || !cSearch || (r.Order || "").toLowerCase().includes(s) || (r.NameOfItem || "").toLowerCase().includes(s))
+                              .filter(r => !popupSearch || (r.NameOfItem || "").toLowerCase().includes(popupSearch.toLowerCase()) || (r.Order || "").toLowerCase().includes(popupSearch.toLowerCase()))
+                              .sort((a,b) => new Date(a.DueOn || 0).getTime() - new Date(b.DueOn || 0).getTime())
+                              .map((r, i) => (
                             <tr key={i} className="hover:bg-slate-50 transition-colors">
                                <td className="px-6 py-4 font-bold text-text-muted">{fmtDate(r.DueOn || r.Date)}</td>
                                <td className="px-4 py-4 font-mono font-black text-text-muted uppercase">#{r.Order.slice(-10)}</td>
@@ -1718,7 +2474,7 @@ export default function App() {
                                   </div>
                                </td>
                             </tr>
-                         ))}
+                         ))})()}
                       </tbody>
                    </table>
                 </div>
@@ -1739,83 +2495,129 @@ export default function App() {
             />
             <motion.div 
               initial={{ scale: 0.95, opacity: 0, x: 30 }} animate={{ scale: 1, opacity: 1, x: 0 }} exit={{ scale: 0.95, opacity: 0, x: 30 }}
-              className="bg-surface w-full max-w-4xl max-h-[85vh] overflow-hidden rounded-[32px] shadow-2xl relative flex flex-col border border-border-custom"
+              className="bg-surface w-[98vw] h-[98vh] overflow-hidden rounded-2xl shadow-2xl relative flex flex-col border border-border-custom"
             >
               <div className="p-8 border-b border-border-custom flex justify-between items-center bg-surface2/30">
                 <div className="flex items-center gap-5">
-                   <div className="w-12 h-12 bg-white border border-border-custom rounded-2xl flex items-center justify-center shadow-sm">
-                      <FileText className="w-6 h-6 text-primary" />
-                   </div>
-                   <div>
-                    <h2 className="text-xl font-black text-text-main uppercase tracking-tight leading-none mb-1">{showInvPopup}</h2>
-                    <p className="text-[10px] text-text-muted font-bold uppercase tracking-widest opacity-80">Historical Billing & Ledger</p>
+                   <div className="w-14 h-14 bg-avail rounded-2xl flex items-center justify-center shadow-lg shadow-avail/20 shrink-0">
+                    <FileText className="w-7 h-7 text-white" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-black text-text-main uppercase tracking-tight leading-none mb-1">{showInvPopup}</h2>
+                    <p className="text-[10px] text-text-muted font-bold uppercase tracking-widest opacity-80">Historical Billing & Ledger Detailed View</p>
+                  </div>
+                  <div className="ml-10 relative">
+                     <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
+                     <input 
+                      placeholder="Search particulars / Voucher No..."
+                      value={popupSearch}
+                      onChange={e => setPopupSearch(e.target.value)}
+                      className="bg-white border border-border-custom rounded-xl pl-10 pr-4 py-2 text-xs font-bold outline-none focus:border-primary w-64 shadow-sm"
+                     />
                    </div>
                 </div>
-                <button 
-                  onClick={() => setShowInvPopup(null)}
-                  className="w-10 h-10 rounded-full hover:bg-slate-200 flex items-center justify-center transition-colors border border-border-custom bg-white shadow-sm"
-                >
-                  <Search className="w-5 h-5 text-text-muted rotate-45" />
-                </button>
-              </div>
+                <div className="flex items-center gap-4">
+                   <button 
+                     onClick={() => {
+                       const s = cSearch.toLowerCase();
+                       const filteredInvoices = dynamicInvoices.filter(inv => (inv.Buyer || "").toLowerCase().trim() === showInvPopup?.toLowerCase().trim());
+                       const exportData = filteredInvoices
+                          .filter(inv => activeTab !== 'customers' || !cSearch || (inv.VoucherNo || "").toLowerCase().includes(s) || (inv.VoucherRef || "").toLowerCase().includes(s) || (inv.Particulars || "").toLowerCase().includes(s))
+                          .map(inv => ({
+                         "Date": fmtDate(inv.Date),
+                         "Invoice No": inv.VoucherNo,
+                         "Customer PO No": inv.VoucherRef,
+                         "Item Description": inv.Particulars,
+                         "Quantity": inv.Quantity,
+                         "Rate": inv.Value / (inv.Quantity || 1),
+                         "Total Value": inv.Value
+                       }));
+                       exportToExcel(exportData, `${showInvPopup}_Invoices`);
+                     }}
+                     className="flex items-center gap-1.5 bg-white border border-border-custom text-text-muted px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-wider hover:bg-slate-50 transition-all shadow-sm"
+                    >
+                      <Download className="w-3.5 h-3.5" /> EXPORT EXCEL
+                   </button>
+                   <button 
+                    onClick={() => setShowInvPopup(null)}
+                    className="w-10 h-10 rounded-full hover:bg-danger/10 text-danger flex items-center justify-center transition-all border border-danger/20 bg-white shadow-sm hover:scale-110"
+                   >
+                    <X className="w-5 h-5" />
+                   </button>
+                 </div>
+               </div>
+               <div className="flex-1 overflow-y-auto scrollbar-custom p-8 bg-slate-50/20">
+                  <div className="bg-white border border-border-custom rounded-2xl overflow-hidden shadow-sm">
+                    <table className="w-full text-left text-[11px] border-separate border-spacing-0">
+                       <thead className="bg-slate-50/50 sticky top-0 z-10 font-black text-text-muted uppercase text-[10px] border-b border-border-custom">
+                          <tr>
+                             <th className="px-6 py-4 border-b border-border-custom">Date</th>
+                             <th className="px-4 py-4 border-b border-border-custom">Invoice No</th>
+                             <th className="px-4 py-4 border-b border-border-custom">Customer PO No</th>
+                             <th className="px-4 py-4 border-b border-border-custom">Description</th>
+                             <th className="px-4 py-4 border-b border-border-custom text-right">Qty</th>
+                             <th className="px-4 py-4 border-b border-border-custom text-right">Rate</th>
+                             <th className="px-6 py-4 border-b border-border-custom text-right">Value</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {(() => {
+                            const s = cSearch.toLowerCase();
+                            const flatItems = dynamicInvoices
+                              .filter(inv => (inv.Buyer || "").toLowerCase().trim() === showInvPopup?.toLowerCase().trim())
+                              .filter(inv => activeTab !== 'customers' || !cSearch || (inv.VoucherNo || "").toLowerCase().includes(s) || (inv.VoucherRef || "").toLowerCase().includes(s) || (inv.Particulars || "").toLowerCase().includes(s))
+                              .filter(inv => !popupSearch || (inv.Particulars || "").toLowerCase().includes(popupSearch.toLowerCase()) || (inv.VoucherNo || "").toLowerCase().includes(popupSearch.toLowerCase()) || (inv.VoucherRef || "").toLowerCase().includes(popupSearch.toLowerCase()));
 
-              <div className="flex-1 overflow-y-auto scrollbar-custom p-8 space-y-6 bg-slate-50/20">
-                 {dynamicInvoices.filter(inv => inv.Buyer.toLowerCase().trim() === showInvPopup?.toLowerCase().trim()).map((inv, idx) => (
-                    <div key={idx} className="bg-white border border-border-custom rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-all">
-                       <div className="p-5 flex justify-between items-center bg-slate-50/50 border-b border-border-custom">
-                          <div className="flex gap-8 items-center">
-                             <div>
-                               <div className="text-[9px] font-black text-text-muted uppercase tracking-widest mb-0.5 opacity-70">Invoice ID</div>
-                               <div className="text-sm font-black font-mono text-text-main">{inv.VoucherNo}</div>
-                             </div>
-                             <div>
-                               <div className="text-[9px] font-black text-text-muted uppercase tracking-widest mb-0.5 opacity-70">Date</div>
-                               <div className="text-sm font-bold text-text-main">{fmtDate(inv.Date)}</div>
-                             </div>
-                          </div>
-                          <div className="text-right">
-                            <div className="text-[10px] font-black text-text-muted uppercase tracking-widest mb-0.5 opacity-70">Total Value</div>
-                            <div className="text-lg font-black text-primary">{fmtCur(inv.Value)}</div>
-                          </div>
-                       </div>
-                       <div className="overflow-x-auto">
-                          <table className="w-full text-left text-[11px] border-separate border-spacing-0">
-                             <thead className="bg-slate-50/30 font-black text-text-muted uppercase text-[10px] border-b border-border-custom">
+                            if (flatItems.length === 0) {
+                              return (
                                 <tr>
-                                   <th className="px-6 py-3">Description</th>
-                                   <th className="px-4 py-3 text-right">Quantity</th>
-                                   <th className="px-4 py-3 text-right">Rate</th>
-                                   <th className="px-6 py-3 text-right">Line Total</th>
+                                  <td colSpan={7} className="py-20 text-center opacity-40 italic font-bold text-sm">No verified invoicing records located for this specific buyer profile.</td>
                                 </tr>
-                             </thead>
-                             <tbody className="divide-y divide-slate-100">
-                               {inv.Items.map((it, j) => (
-                                 <tr key={j} className="hover:bg-slate-50/50">
-                                   <td className="px-6 py-3 text-text-main font-bold truncate max-w-[300px]">{it.Particulars}</td>
-                                   <td className="px-4 py-3 text-right font-mono font-bold text-text-muted">{it.Quantity}</td>
-                                   <td className="px-4 py-3 text-right font-mono font-bold text-text-muted">{fmtCur(it.Value / (it.Quantity || 1))}</td>
-                                   <td className="px-6 py-3 text-right font-mono font-black text-text-main">{fmtCur(it.Value)}</td>
-                                 </tr>
-                               ))}
-                             </tbody>
-                             <tfoot>
-                               <tr className="bg-slate-100/50 font-black text-text-main border-t border-border-custom">
-                                  <td colSpan={3} className="px-6 py-4 text-right uppercase tracking-wider text-[10px] text-text-muted">Invoice Final Value</td>
-                                  <td className="px-6 py-4 text-right text-base text-primary">{fmtCur(inv.Value)}</td>
+                              );
+                            }
+
+                            const totalQty = flatItems.reduce((s, it) => s + (it.Quantity || 0), 0);
+                            const totalVal = flatItems.reduce((s, it) => s + (it.Value || 0), 0);
+
+                            return (
+                              <>
+                                <tr className="bg-slate-50/80 border-b-2 border-slate-200">
+                                   <td colSpan={4} className="px-6 py-3 text-[10px] font-black text-text-muted uppercase tracking-widest text-right">Filtered Totals:</td>
+                                   <td className="px-4 py-3 text-right font-black text-text-main text-sm">{fmtNum(totalQty)}</td>
+                                   <td className="px-4 py-3"></td>
+                                   <td className="px-6 py-3 text-right font-black text-primary text-sm">{fmtCur(totalVal)}</td>
                                 </tr>
-                             </tfoot>
-                          </table>
-                       </div>
-                    </div>
-                 ))}
-                 {dynamicInvoices.filter(inv => inv.Buyer.toLowerCase().trim() === showInvPopup?.toLowerCase().trim()).length === 0 && (
-                    <div className="py-20 text-center opacity-40 italic font-bold">No verified invoicing records located for this specific buyer profile.</div>
-                 )}
-              </div>
+                                {flatItems.map((it, idx) => (
+                                  <tr key={idx} className="hover:bg-slate-50/50 transition-colors">
+                                    <td className="px-6 py-4 font-bold text-text-muted whitespace-nowrap">{fmtDate(it.Date)}</td>
+                                    <td className="px-4 py-4 font-mono font-black text-text-muted uppercase whitespace-nowrap">#{it.VoucherNo}</td>
+                                    <td className="px-4 py-4 font-bold text-text-muted uppercase whitespace-nowrap text-[10px]">{it.VoucherRef}</td>
+                                    <td className="px-4 py-4 font-bold text-text-main max-w-[300px] truncate">{it.Particulars}</td>
+                                    <td className="px-4 py-4 text-right font-black">{it.Quantity}</td>
+                                    <td className="px-4 py-4 text-right font-bold text-text-muted">{fmtCur(it.Value / (it.Quantity || 1))}</td>
+                                    <td className="px-6 py-4 text-right font-black text-avail">{fmtCur(it.Value)}</td>
+                                  </tr>
+                                ))}
+                              </>
+                            );
+                          })()}
+                        </tbody>
+                    </table>
+                  </div>
+               </div>
+
             </motion.div>
           </div>
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <MainApp />
+    </ErrorBoundary>
   );
 }
