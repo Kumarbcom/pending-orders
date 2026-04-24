@@ -22,6 +22,7 @@ export interface SalesOrder {
   StockStatus: "Available" | "PO Exist - Expedite" | "Need to Place Order";
   POStatus: string;
   ExpDelivery: string;
+  Aging: string;
 }
 
 export interface PurchaseOrder {

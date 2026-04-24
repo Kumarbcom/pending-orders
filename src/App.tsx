@@ -45,8 +45,7 @@ import { ALL_SO as INITIAL_SO, ALL_INVOICE, META } from './data';
 import { SalesOrder, Invoice, PurchaseOrder, StockItem, MaterialMasterItem, CustomerMasterItem } from './types';
 import { cn } from './lib/utils';
 import logo from './logo.jpg';
-import { db } from './firebase';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { supabase } from './supabase';
 
 // --- Utils ---
 const fmtCur = (v: number) => {
@@ -60,6 +59,15 @@ const fmtCur = (v: number) => {
 const fmtNum = (v: number) => {
   if (v == null) return '—';
   return v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+
+const extractNum = (val: any): number => {
+  if (typeof val === 'number') return val;
+  if (val == null || val === '') return 0;
+  // Handle strings: remove commas and other non-numeric chars except dot and minus
+  const clean = String(val).replace(/[^0-9.-]/g, '');
+  const num = parseFloat(clean);
+  return isNaN(num) ? 0 : num;
 };
 
 const fmtDate = (d: any) => {
@@ -108,6 +116,14 @@ const parseDateObj = (d: any): Date | null => {
     if (parts.length === 3) {
       if (parts[2].length === 4) return new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
       if (parts[0].length === 4) return new Date(`${parts[0]}-${parts[1]}-${parts[2]}`);
+      
+      // Handle DD-MMM-YY (e.g. 25-Sept-24)
+      if (parts[2].length === 2) {
+        const yearPrefix = Number(parts[2]) > 50 ? '19' : '20';
+        const iso = `${yearPrefix}${parts[2]}-${parts[1]}-${parts[0]}`;
+        const dt2 = new Date(iso);
+        if (!isNaN(dt2.getTime())) return dt2;
+      }
     }
   } catch(e) { return null; }
   return null;
@@ -179,10 +195,11 @@ const SortIcon = ({ active, direction }: { active: boolean; direction: 'asc' | '
   </span>
 );
 
-const Th = ({ children, onSort, sortKey, activeField, direction, className }: any) => (
+const Th = ({ children, onSort, sortKey, activeField, direction, className, ...props }: any) => (
   <th 
     onClick={() => onSort?.(sortKey)}
     className={cn("cursor-pointer hover:bg-slate-100 transition-colors group relative", className)}
+    {...props}
   >
     <div className="flex items-center justify-between gap-1">
       <span>{children}</span>
@@ -192,64 +209,52 @@ const Th = ({ children, onSort, sortKey, activeField, direction, className }: an
 );
 
 const exportToExcel = (data: any[], fileName: string) => {
+  if (!data || !data.length) {
+    alert("No data to export. Please ensure data is loaded.");
+    return;
+  }
+
+  const cleanName = (fileName || 'Report').replace(/[^a-z0-9]/gi, '_').slice(0, 50);
+
   try {
-    if (!data || !data.length) {
-      alert("No data available to export.");
-      return;
+    // Try XLSX export
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Data");
+    const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `${cleanName}.xlsx`);
+    document.body.appendChild(link);
+    link.click();
+    link.parentNode?.removeChild(link);
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    // Fallback: export as CSV
+    try {
+      const headers = Object.keys(data[0]);
+      const csvRows = [
+        headers.join(','),
+        ...data.map(row => headers.map(h => {
+          const val = row[h] == null ? '' : String(row[h]);
+          return `"${val.replace(/"/g, '""')}"`;
+        }).join(','))
+      ];
+      const csvContent = csvRows.join('\n');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `${cleanName}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      link.parentNode?.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (csvErr: any) {
+      alert('Export failed: ' + csvErr.message);
     }
-    const cleanName = (fileName || 'Report').replace(/[^a-z0-9]/gi, '_').slice(0, 50);
-    const headers = Object.keys(data[0]);
-
-    // Create styled HTML table
-    let tableRows = `<tr>${headers.map(h => `<th style="background-color: #E0E0E0; border: 1px solid #000000; font-family: 'Cambria', serif; font-size: 10pt; text-align: left; padding: 5px;">${h}</th>`).join('')}</tr>`;
-    
-    data.forEach(row => {
-      tableRows += '<tr>';
-      headers.forEach(h => {
-        let val = row[h];
-        if (val === null || val === undefined) val = '';
-        
-        const isNum = /rate|value|price|amount|balance|total|ordered|qty/i.test(h);
-        const isDate = /date|due/i.test(h);
-        
-        let style = "border: 1px solid #000000; font-family: 'Cambria', serif; font-size: 10pt; padding: 5px;";
-        let msoFormat = "";
-        
-        if (isNum) {
-          style += " text-align: right;";
-          msoFormat = 'style="mso-number-format:\'\\#\\,\\#\\#0\\.00\'"';
-        } else if (isDate) {
-          msoFormat = 'style="mso-number-format:\'dd\\-mmm\\-yy\'"';
-        } else {
-          msoFormat = 'style="mso-number-format:\'@\'"'; // Format as text
-        }
-        
-        tableRows += `<td ${msoFormat} style="${style}">${val}</td>`;
-      });
-      tableRows += '</tr>';
-    });
-
-    const html = `
-      <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
-      <head><meta charset="utf-8"></head>
-      <body>
-        <table border="1">${tableRows}</table>
-      </body>
-      </html>
-    `;
-
-    const blob = new Blob([html], { type: 'application/vnd.ms-excel' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${cleanName}.xls`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    window.URL.revokeObjectURL(url);
-  } catch (err) {
-    console.error("Export Error:", err);
-    alert("Export failed: " + err);
   }
 };
 
@@ -309,13 +314,18 @@ function MainApp() {
   const [showSOPopup, setShowSOPopup] = useState<string | null>(null);
   const [showInvPopup, setShowInvPopup] = useState<string | null>(null);
 
-   // --- Firebase Persistence Logic ---
-   const saveToFirebase = async (type: string, data: any) => {
+   // --- Supabase Persistence Logic ---
+   const saveToAPI = async (type: string, data: any) => {
      setIsSyncing(true);
+     localStorage.setItem(type, JSON.stringify(data)); // instant local cache
      try {
-       await setDoc(doc(db, "app_data", type), { data, updatedAt: new Date().toISOString() });
+       if (supabase) {
+         await supabase
+           .from('app_data')
+           .upsert({ type, data, updated_at: new Date().toISOString() }, { onConflict: 'type' });
+       }
      } catch (error) {
-       console.error(`Error saving ${type}:`, error);
+       console.warn(`Supabase save failed for ${type}, saved locally only.`);
      } finally {
        setIsSyncing(false);
      }
@@ -324,24 +334,42 @@ function MainApp() {
    useEffect(() => {
      const loadData = async () => {
        setIsSyncing(true);
-       try {
-         const datasets = [
-           { type: 'dynamicSO', setter: setDynamicSO },
-           { type: 'dynamicPO', setter: setDynamicPO },
-           { type: 'dynamicStock', setter: setDynamicStock },
-           { type: 'dynamicMaterialMaster', setter: setDynamicMaterialMaster },
-           { type: 'dynamicCustomerMaster', setter: setDynamicCustomerMaster },
-           { type: 'dynamicInvoices', setter: setDynamicInvoices }
-         ];
+       const datasets = [
+         { type: 'dynamicSO', setter: setDynamicSO },
+         { type: 'dynamicPO', setter: setDynamicPO },
+         { type: 'dynamicStock', setter: setDynamicStock },
+         { type: 'dynamicMaterialMaster', setter: setDynamicMaterialMaster },
+         { type: 'dynamicCustomerMaster', setter: setDynamicCustomerMaster },
+         { type: 'dynamicInvoices', setter: setDynamicInvoices }
+       ];
 
-         for (const ds of datasets) {
-           const snap = await getDoc(doc(db, "app_data", ds.type));
-           if (snap.exists()) {
-             ds.setter(snap.data().data || []);
+       // 1. Load from localStorage immediately (instant startup)
+       datasets.forEach(ds => {
+         const local = localStorage.getItem(ds.type);
+         if (local) {
+           try { ds.setter(JSON.parse(local)); } catch(e) {}
+         }
+       });
+
+       // 2. Sync with Supabase cloud
+       try {
+         if (supabase) {
+           const { data: rows } = await supabase
+             .from('app_data')
+             .select('type, data');
+
+           if (rows && rows.length > 0) {
+             rows.forEach((row: { type: string; data: any }) => {
+               const ds = datasets.find(d => d.type === row.type);
+               if (ds && row.data && row.data.length > 0) {
+                 ds.setter(row.data);
+                 localStorage.setItem(row.type, JSON.stringify(row.data));
+               }
+             });
            }
          }
        } catch (error) {
-         console.error("Error loading data from Firebase:", error);
+         console.warn('Supabase sync failed, using local cache.');
        } finally {
          setIsSyncing(false);
        }
@@ -378,7 +406,7 @@ function MainApp() {
     try {
       const types = ['dynamicSO', 'dynamicPO', 'dynamicStock', 'dynamicMaterialMaster', 'dynamicCustomerMaster', 'dynamicInvoices'];
       for (const t of types) {
-        await saveToFirebase(t, []);
+        await saveToAPI(t, []);
       }
       setDynamicSO([]);
       setDynamicPO([]);
@@ -440,19 +468,8 @@ function MainApp() {
           }
         });
 
-        const extractNum = (val: any) => {
-          if (typeof val === 'number') return val;
-          if (!val) return 0;
-          const match = String(val).match(/[\d.]+/);
-          return match ? parseFloat(match[0]) : 0;
-        };
-
         const party = String(row["Party's Name"] || row['Party Name'] || row['End-Customer'] || row['Customer'] || '').trim();
         const itemName = String(row['Name of Item'] || row['Item Name'] || row['Description'] || '').trim();
-        const orderQty = extractNum(row['Ordered'] || row['Order'] || row['Ordered Qty'] || row['Qty']);
-        const balQty = extractNum(row['Balance'] || row['Balar'] || row['Balance Qty']);
-        const val = extractNum(row['Value'] || row['Amount']);
-
         if (!party && !itemName) return null; // Skip empty rows
 
         return {
@@ -462,11 +479,11 @@ function MainApp() {
           NameOfItem: itemName,
           MaterialCode: row['Material Code'] || '',
           PartNo: row['Part No'] || '',
-          Ordered: orderQty,
-          Balance: balQty,
+          Ordered: extractNum(row['Ordered'] || row['Order'] || row['Ordered Qty'] || row['Qty']),
+          Balance: extractNum(row['Balance'] || row['Balar'] || row['Balance Qty']),
           Rate: extractNum(row['Rate'] || row['R'] || row['Price']),
           Discount: extractNum(row['Discount'] || row['Discou']),
-          Value: val,
+          Value: extractNum(row['Value'] || row['Amount']),
           DueOn: row['Due on'] || row['Due'] || null,
           DueSerial: null,
           Make: '',
@@ -478,13 +495,14 @@ function MainApp() {
           StockShortfall: 0,
           StockStatus: 'Need to Place Order',
           POStatus: '',
-          ExpDelivery: ''
+          ExpDelivery: '',
+          Aging: ''
         };
       }).filter(Boolean) as SalesOrder[];
 
       if (parsed.length > 0) {
         setDynamicSO(parsed);
-        saveToFirebase('dynamicSO', parsed);
+        saveToAPI('dynamicSO', parsed);
         alert(`Successfully uploaded ${parsed.length} Sales Orders.`);
       } else {
         alert("No Sales Order data could be parsed from this file. Check headers.");
@@ -530,19 +548,8 @@ function MainApp() {
           }
         });
 
-        const extractNum = (val: any) => {
-          if (typeof val === 'number') return val;
-          if (!val) return 0;
-          const match = String(val).match(/[\d.]+/);
-          return match ? parseFloat(match[0]) : 0;
-        };
-
         const party = String(row["Party's Name"] || row['Party Name'] || row['Supplier'] || '').trim();
         const itemName = String(row['Name of Item'] || row['Item Name'] || row['Description'] || '').trim();
-        const orderQty = extractNum(row['Ordered'] || row['Ordered Qty'] || row['Qty']);
-        const balQty = extractNum(row['Balance'] || row['Balance Qty']);
-        const val = extractNum(row['Value'] || row['Amount']);
-
         if (!party && !itemName) return null; // Skip empty rows
 
         return {
@@ -552,18 +559,18 @@ function MainApp() {
           NameOfItem: itemName,
           MaterialCode: row['Material Code'] || '',
           PartNo: row['Part No'] || '',
-          Ordered: orderQty,
-          Balance: balQty,
+          Ordered: extractNum(row['Ordered'] || row['Ordered Qty'] || row['Qty']),
+          Balance: extractNum(row['Balance'] || row['Balance Qty']),
           Rate: extractNum(row['Rate'] || row['Price']),
           Discount: extractNum(row['Discount']),
-          Value: val,
+          Value: extractNum(row['Value'] || row['Amount']),
           DueOn: row['Due on'] || row['Due'] || null
         };
       }).filter(Boolean) as PurchaseOrder[];
 
       if (parsed.length > 0) {
         setDynamicPO(parsed);
-        saveToFirebase('dynamicPO', parsed);
+        saveToAPI('dynamicPO', parsed);
         alert(`Successfully uploaded ${parsed.length} PO records.`);
       } else {
         alert("No Purchase Order data could be parsed from this file. Check headers.");
@@ -583,30 +590,51 @@ function MainApp() {
       const wb = XLSX.read(bstr, { type: 'binary' });
       const wsname = wb.SheetNames[0];
       const ws = wb.Sheets[wsname];
-      const data = XLSX.utils.sheet_to_json(ws);
+      const rawData = (XLSX.utils.sheet_to_json(ws, { header: 1 }) || []) as any[][];
+      if (!rawData || rawData.length === 0) return;
 
-      const parsed: StockItem[] = data.map((row: any) => {
-        const extractNum = (val: any) => {
-          if (typeof val === 'number') return val;
-          if (!val) return 0;
-          const match = String(val).match(/[\d.]+/);
-          return match ? parseFloat(match[0]) : 0;
-        };
+      let headerIdx = 0;
+      for (let i = 0; i < Math.min(rawData.length, 20); i++) {
+        const row = rawData[i];
+        if (row && row.some(cell => typeof cell === 'string' && (cell.includes("Particulars") || cell.includes("Description") || cell.includes("Item") || cell.includes("Qty")))) {
+          headerIdx = i;
+          break;
+        }
+      }
+
+      const headers = rawData[headerIdx] || [];
+      const rows = rawData.slice(headerIdx + 1);
+
+      const parsed: StockItem[] = rows.map((rowArr: any[]) => {
+        const row: any = {};
+        headers.forEach((h, idx) => {
+          if (h && typeof h === 'string') {
+             const cleanHeader = h.replace(/\r?\n|\r/g, ' ').trim();
+             row[cleanHeader] = rowArr[idx];
+          }
+        });
+
+        const particulars = String(row['Particulars'] || row['Description'] || row['Item Name'] || row['Name of Item'] || '').trim();
+        if (!particulars) return null;
 
         return {
-          Particulars: row['Particulars'] || '',
-          Quantity: extractNum(row['Quantity']),
-          Rate: extractNum(row['Rate']),
-          Value: extractNum(row['Value'])
+          Particulars: particulars,
+          Quantity: extractNum(row['Quantity'] || row['Qty'] || row['Closing Stock']),
+          Rate: extractNum(row['Rate'] || row['Price']),
+          Value: extractNum(row['Value'] || row['Amount'])
         };
-      });
+      }).filter(Boolean) as StockItem[];
 
       if (parsed.length > 0) {
         setDynamicStock(parsed);
-        saveToFirebase('dynamicStock', parsed);
+        saveToAPI('dynamicStock', parsed);
+        alert(`Successfully uploaded ${parsed.length} stock items.`);
+      } else {
+        alert("No stock data could be parsed. Check headers (Particulars/Description, Quantity/Qty).");
       }
     };
     reader.readAsBinaryString(file);
+    e.target.value = '';
   };
 
   const handleMaterialUpload = (e: ChangeEvent<HTMLInputElement>) => {
@@ -632,7 +660,7 @@ function MainApp() {
 
       if (parsed.length > 0) {
         setDynamicMaterialMaster(parsed);
-        saveToFirebase('dynamicMaterialMaster', parsed);
+        saveToAPI('dynamicMaterialMaster', parsed);
         alert(`Successfully uploaded ${parsed.length} Materials.`);
       }
     };
@@ -663,7 +691,7 @@ function MainApp() {
 
       if (parsed.length > 0) {
         setDynamicCustomerMaster(parsed);
-        saveToFirebase('dynamicCustomerMaster', parsed);
+        saveToAPI('dynamicCustomerMaster', parsed);
       }
     };
     reader.readAsBinaryString(file);
@@ -706,12 +734,6 @@ function MainApp() {
       let lastVRef = '';
       let lastGSTIN = '';
 
-      const extractNum = (val: any) => {
-        if (typeof val === 'number') return val;
-        if (!val) return 0;
-        const match = String(val).match(/[\d.]+/);
-        return match ? parseFloat(match[0]) : 0;
-      };
 
       rows.forEach((rowArr: any[]) => {
         const row: any = {};
@@ -753,13 +775,6 @@ function MainApp() {
              return;
           }
 
-          // Remove customer name if it exists in particulars
-          if (lastBuyer) {
-            const escapedBuyer = lastBuyer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const buyerRegex = new RegExp(`^${escapedBuyer}|${escapedBuyer}$`, 'gi');
-            pText = pText.replace(buyerRegex, '').replace(/^[\s\W]+|[\s\W]+$/g, '').trim();
-          }
-
           if (!pText || pText.length < 3 || pText.toLowerCase() === 'particulars') return; 
           
           invoices.push({
@@ -779,7 +794,7 @@ function MainApp() {
 
       if (invoices.length > 0) {
         setDynamicInvoices(invoices);
-        saveToFirebase('dynamicInvoices', invoices);
+        saveToAPI('dynamicInvoices', invoices);
         alert(`Successfully uploaded ${invoices.length} line items.`);
       } else {
         alert("No Invoice data could be parsed from this file. Check headers.");
@@ -796,8 +811,8 @@ function MainApp() {
 
   const selectedCustomerData = useMemo(() => {
     if (!showSOPopup && !showInvPopup) return null;
-    const name = showSOPopup || showInvPopup;
-    return dynamicCustomerMaster.find(c => c.CustomerName === name) || null;
+    const name = (showSOPopup || showInvPopup || "").trim().toUpperCase();
+    return dynamicCustomerMaster.find(c => (c.CustomerName || "").trim().toUpperCase() === name) || null;
   }, [showSOPopup, showInvPopup, dynamicCustomerMaster]);
 
   // FIFO PROCESSING LOGIC
@@ -805,16 +820,18 @@ function MainApp() {
     const now = new Date();
     const CUTOFF_DATE = new Date(now.getFullYear(), now.getMonth() + 1, 0);
     
-    // 1. Prepare Stock Map for FIFO
+    // 1. Prepare Stock Map for FIFO (using normalized keys)
     const stockMap: Record<string, number> = {};
     dynamicStock.forEach(s => {
-      stockMap[s.Particulars] = (stockMap[s.Particulars] || 0) + s.Quantity;
+      const key = s.Particulars.trim().toUpperCase();
+      stockMap[key] = (stockMap[key] || 0) + s.Quantity;
     });
 
-    // 2. Prepare PO Map
+    // 2. Prepare PO Map (using normalized keys)
     const poMap: Record<string, number> = {};
     dynamicPO.forEach(p => {
-      poMap[p.NameOfItem] = (poMap[p.NameOfItem] || 0) + p.Balance;
+      const key = p.NameOfItem.trim().toUpperCase();
+      poMap[key] = (poMap[key] || 0) + p.Balance;
     });
 
     // 3. Enrich and Classify
@@ -830,27 +847,50 @@ function MainApp() {
       const dueDate = parseDateObj(so.DueOn);
       const orderType = (dueDate && dueDate <= CUTOFF_DATE) ? 'Due' : 'Schedule';
       
-      // Stock Allocation
-      const available = stockMap[so.NameOfItem] || 0;
+      // Stock Allocation (Try matching by Name, then Part No)
+      const nameKey = so.NameOfItem.trim().toUpperCase();
+      const partKey = (so.PartNo || "").trim().toUpperCase();
+      
+      let available = stockMap[nameKey] || 0;
+      if (available <= 0 && partKey) available = stockMap[partKey] || 0;
+
       const allocated = Math.min(available, so.Balance);
-      stockMap[so.NameOfItem] = Math.max(0, available - allocated);
+      
+      // Update the map to reflect consumption
+      if (stockMap[nameKey] >= allocated) stockMap[nameKey] -= allocated;
+      else if (partKey && stockMap[partKey] >= allocated) stockMap[partKey] -= allocated;
       
       const shortfall = so.Balance - allocated;
       
       // PO Lookup
       let status: "Available" | "PO Exist - Expedite" | "Need to Place Order" = "Available";
       if (shortfall > 0) {
-        const poAvailable = poMap[so.NameOfItem] || 0;
+        let poAvailable = poMap[nameKey] || 0;
+        if (poAvailable <= 0 && partKey) poAvailable = poMap[partKey] || 0;
+
         if (poAvailable > 0) {
           status = "PO Exist - Expedite";
-          poMap[so.NameOfItem] = Math.max(0, poAvailable - shortfall);
+          if (poMap[nameKey] >= shortfall) poMap[nameKey] -= shortfall;
+          else if (partKey && poMap[partKey] >= shortfall) poMap[partKey] -= shortfall;
         } else {
           status = "Need to Place Order";
         }
       }
 
-      const material = dynamicMaterialMaster.find(m => m.Description === so.NameOfItem);
-      const customer = dynamicCustomerMaster.find(c => c.CustomerName === so.PartyName);
+      const material = dynamicMaterialMaster.find(m => (m.Description || "").trim().toUpperCase() === (so.NameOfItem || "").trim().toUpperCase());
+      const customer = dynamicCustomerMaster.find(c => (c.CustomerName || "").trim().toUpperCase() === (so.PartyName || "").trim().toUpperCase());
+
+      // Aging Group Logic
+      let agingGroup = 'Below 30 days';
+      const refDate = parseDateObj(so.DueOn || so.Date);
+      if (refDate) {
+        const diffDays = Math.floor((CUTOFF_DATE.getTime() - refDate.getTime()) / (1000 * 60 * 60 * 24));
+        if (diffDays >= 365) agingGroup = '1 Year or older';
+        else if (diffDays >= 180) agingGroup = '180 and more days';
+        else if (diffDays >= 90) agingGroup = '90 to 180 days';
+        else if (diffDays >= 60) agingGroup = '60 to 90 days';
+        else if (diffDays >= 30) agingGroup = '30 to 60 days';
+      }
 
       return {
         ...so,
@@ -861,7 +901,8 @@ function MainApp() {
         Make: material?.Make || so.Make,
         MaterialGroup: material?.MaterialGroup || so.MaterialGroup,
         Group: customer?.Group || so.Group,
-        CustomerGroup: customer?.CustomerGroup || so.CustomerGroup
+        CustomerGroup: customer?.CustomerGroup || so.CustomerGroup,
+        Aging: agingGroup // Placed last to ensure it wins
       } as SalesOrder;
     });
   }, [dynamicSO, dynamicStock, dynamicPO, dynamicMaterialMaster, dynamicCustomerMaster]);
@@ -968,7 +1009,7 @@ function MainApp() {
       });
     }
     return list;
-  }, [processedSO, soType, soMake, soGroup, soCust, soStatus, sortField, sortDirection]);
+  }, [processedSO, soType, soMake, soGroup, soCust, soStatus, sortField, sortDirection, searchTerm]);
 
   const customFilterSOTab = useMemo(() => {
     const total = filteredSO.reduce((s, r) => s + r.Value, 0);
@@ -994,17 +1035,23 @@ function MainApp() {
 
       const matchesSearch = !cSearch || 
         r.PartyName.toLowerCase().includes(s) || 
-        (r.Order || "").toLowerCase().includes(s) ||
+        (String(r.Order) || "").toLowerCase().includes(s) ||
         (r.NameOfItem || "").toLowerCase().includes(s);
 
       if (!matchesSearch) return;
 
-      if (!custMap[r.PartyName]) {
-        custMap[r.PartyName] = { name: r.PartyName, total: 0, dueVal: 0, schedVal: 0, group: r.Group || 'N/A', cgroup: r.CustomerGroup || 'N/A', invCount: 0, invVal: 0 };
+      const key = r.PartyName.trim().toUpperCase();
+      if (!custMap[key]) {
+        custMap[key] = { name: r.PartyName, total: 0, dueVal: 0, schedVal: 0, dueAvail: 0, dueExp: 0, dueNeed: 0, group: r.Group || 'N/A', cgroup: r.CustomerGroup || 'N/A', invCount: 0, invVal: 0 };
       }
-      const c = custMap[r.PartyName];
+      const c = custMap[key];
       c.total += r.Value || 0;
-      if (r.OrderType === 'Due') c.dueVal += r.Value || 0;
+      if (r.OrderType === 'Due') {
+        c.dueVal += r.Value || 0;
+        if (r.StockStatus === 'Available') c.dueAvail += r.Value || 0;
+        else if (r.StockStatus === 'PO Exist - Expedite') c.dueExp += r.Value || 0;
+        else if (r.StockStatus === 'Need to Place Order') c.dueNeed += r.Value || 0;
+      }
       else if (r.OrderType === 'Schedule') c.schedVal += r.Value || 0;
     });
 
@@ -1015,22 +1062,34 @@ function MainApp() {
       
       const matchesSearch = !cSearch || 
         name.toLowerCase().includes(s) || 
-        (inv.VoucherNo || "").toLowerCase().includes(s) || 
-        (inv.VoucherRef || "").toLowerCase().includes(s) ||
+        (String(inv.VoucherNo) || "").toLowerCase().includes(s) || 
+        (String(inv.VoucherRef) || "").toLowerCase().includes(s) ||
         (inv.Particulars || "").toLowerCase().includes(s);
 
       if (!matchesSearch) return;
 
-      if (!custMap[name]) {
-        custMap[name] = { name, total: 0, dueVal: 0, schedVal: 0, group: 'N/A', cgroup: 'N/A', invCount: 0, invVal: 0 };
+      const key = name.trim().toUpperCase();
+      if (!custMap[key]) {
+        custMap[key] = { name, total: 0, dueVal: 0, schedVal: 0, dueAvail: 0, dueExp: 0, dueNeed: 0, group: 'N/A', cgroup: 'N/A', invCount: 0, invVal: 0 };
       }
-      const c = custMap[name];
+      const c = custMap[key];
       c.invCount++;
       c.invVal += inv.Value || 0;
     });
 
-    return Object.values(custMap).sort((a: any, b: any) => (b.total + b.invVal) - (a.total + a.invVal));
-  }, [processedSO, dynamicInvoices, cGroup, cCGroup, cSearch]);
+    const list = Object.values(custMap);
+    if (sortField && list.length > 0 && (list[0] as any)[sortField] !== undefined) {
+      list.sort((a: any, b: any) => {
+        const fieldA = a[sortField];
+        const fieldB = b[sortField];
+        if (typeof fieldA === 'number' && typeof fieldB === 'number') return sortDirection === 'asc' ? fieldA - fieldB : fieldB - fieldA;
+        return sortDirection === 'asc' ? String(fieldA).localeCompare(String(fieldB)) : String(fieldB).localeCompare(String(fieldA));
+      });
+    } else {
+      list.sort((a: any, b: any) => (b.total + b.invVal) - (a.total + a.invVal));
+    }
+    return list;
+  }, [processedSO, dynamicInvoices, cGroup, cCGroup, cSearch, sortField, sortDirection]);
 
   const dashboardChartsData = useMemo(() => {
     // Total Pending Value Difference Chart (Horizontal Bar)
@@ -1125,25 +1184,107 @@ function MainApp() {
   }, [filteredPOList]);
 
   const filteredStockList = useMemo(() => {
-    let list = dynamicStock.filter(s => {
-      if (stockSearch && !(s.Particulars?.toLowerCase() || "").includes(stockSearch.toLowerCase())) return false;
+    const now = new Date();
+    const CUTOFF_DATE = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+
+    // 1. Aggregates
+    const soAgg: Record<string, { dueQty: number, dueVal: number, schedQty: number, schedVal: number }> = {};
+    processedSO.forEach(r => {
+      const k = (r.NameOfItem || "").trim().toUpperCase();
+      if (!k) return;
+      if (!soAgg[k]) soAgg[k] = { dueQty: 0, dueVal: 0, schedQty: 0, schedVal: 0 };
+      if (r.OrderType === 'Due') {
+        soAgg[k].dueQty += r.Balance || 0;
+        soAgg[k].dueVal += r.Value || 0;
+      } else {
+        soAgg[k].schedQty += r.Balance || 0;
+        soAgg[k].schedVal += r.Value || 0;
+      }
+    });
+
+    const poAgg: Record<string, { dueQty: number, dueVal: number, schedQty: number, schedVal: number }> = {};
+    dynamicPO.forEach(p => {
+      const k = (p.NameOfItem || "").trim().toUpperCase();
+      if (!k) return;
+      if (!poAgg[k]) poAgg[k] = { dueQty: 0, dueVal: 0, schedQty: 0, schedVal: 0 };
+      const dueDt = parseDateObj(p.DueOn);
+      if (dueDt && dueDt <= CUTOFF_DATE) {
+        poAgg[k].dueQty += p.Balance || 0;
+        poAgg[k].dueVal += p.Value || 0;
+      } else {
+        poAgg[k].schedQty += p.Balance || 0;
+        poAgg[k].schedVal += p.Value || 0;
+      }
+    });
+
+    const stockMap: Record<string, StockItem> = {};
+    dynamicStock.forEach(s => {
+      const k = (s.Particulars || "").trim().toUpperCase();
+      if (k) stockMap[k] = s;
+    });
+
+    // 2. Unified Item List
+    const allKeys = Array.from(new Set([
+      ...Object.keys(stockMap),
+      ...Object.keys(soAgg),
+      ...Object.keys(poAgg)
+    ]));
+
+    // 3. Enrichment
+    let enriched = allKeys.map(k => {
+      const s = stockMap[k] || { Particulars: k, Quantity: 0, Rate: 0, Value: 0 };
+      const so = soAgg[k] || { dueQty: 0, dueVal: 0, schedQty: 0, schedVal: 0 };
+      const po = poAgg[k] || { dueQty: 0, dueVal: 0, schedQty: 0, schedVal: 0 };
+
+      const totalSOQty = so.dueQty + so.schedQty;
+      const totalPOQty = po.dueQty + po.schedQty;
+      const netQty = s.Quantity + totalPOQty - totalSOQty;
       
+      const netValue = netQty * s.Rate;
+
+      return {
+        ...s,
+        Particulars: s.Particulars || k,
+        soDueQty: so.dueQty,
+        soDueVal: so.dueVal,
+        soSchedQty: so.schedQty,
+        soSchedVal: so.schedVal,
+        poDueQty: po.dueQty,
+        poDueVal: po.dueVal,
+        poSchedQty: po.schedQty,
+        poSchedVal: po.schedVal,
+        netQty,
+        netValue
+      };
+    });
+
+    // 4. Filtering
+    let list = enriched.filter(s => {
+      if (stockSearch && !(s.Particulars?.toLowerCase() || "").includes(stockSearch.toLowerCase())) return false;
       if (searchTerm) {
         const srch = searchTerm.toLowerCase();
-        return s.Particulars.toLowerCase().includes(srch);
+        return (s.Particulars || "").toLowerCase().includes(srch);
       }
       return true;
     });
+
+    // 5. Sorting
     if (sortField) {
       list = [...list].sort((a: any, b: any) => {
-        const fieldA = a[sortField];
-        const fieldB = b[sortField];
-        if (typeof fieldA === 'number' && typeof fieldB === 'number') return sortDirection === 'asc' ? fieldA - fieldB : fieldB - fieldA;
-        return sortDirection === 'asc' ? String(fieldA).localeCompare(String(fieldB)) : String(fieldB).localeCompare(String(fieldA));
+        let fieldA = a[sortField] ?? 0;
+        let fieldB = b[sortField] ?? 0;
+        
+        if (typeof fieldA === 'number' && typeof fieldB === 'number') {
+          return sortDirection === 'asc' ? fieldA - fieldB : fieldB - fieldA;
+        }
+        return sortDirection === 'asc' 
+          ? String(fieldA).localeCompare(String(fieldB)) 
+          : String(fieldB).localeCompare(String(fieldA));
       });
     }
+
     return list;
-  }, [dynamicStock, stockSearch, searchTerm, sortField, sortDirection]);
+  }, [dynamicStock, processedSO, dynamicPO, stockSearch, searchTerm, sortField, sortDirection]);
 
   const filteredMaterialList = useMemo(() => {
     let list = dynamicMaterialMaster.filter(m => {
@@ -1531,9 +1672,9 @@ function MainApp() {
                           <Th sortKey="group" onSort={handleSort} activeField={sortField} direction={sortDirection}>Group / Area</Th>
                           <Th sortKey="cgroup" onSort={handleSort} activeField={sortField} direction={sortDirection}>Customer Group</Th>
                           <Th sortKey="name" onSort={handleSort} activeField={sortField} direction={sortDirection}>Customer Name</Th>
-                          <th className="text-right">Due (Avail)</th>
-                          <th className="text-right">Due (Arrange)</th>
-                          <th className="text-right">Schedule</th>
+                          <Th sortKey="dueAvail" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right">Due (Avail)</Th>
+                          <Th sortKey="dueArr" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right">Due (Arrange)</Th>
+                          <Th sortKey="sched" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right">Schedule</Th>
                           <Th sortKey="total" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right">Total Outstanding</Th>
                         </tr>
                       </thead>
@@ -1652,17 +1793,20 @@ function MainApp() {
                       <button 
                         onClick={() => {
                           const exportData = filteredSO.map(r => ({
-                            "Due Date": fmtDate(r.DueOn || r.Date),
+                            "Order Date": fmtDate(r.Date),
+                            "Due Date": fmtDate(r.DueOn),
+                            "Overdue": r.Aging,
                             "Voucher No": r.Order,
                             "Customer Name": r.PartyName,
                             "Item Description": r.NameOfItem,
                             "Material Code": r.MaterialCode,
+                            "Material Group": r.MaterialGroup || '',
                             "Pending Qty": r.Balance,
                             "Rate": r.Rate,
                             "Value": r.Value,
                             "Allocation Status": r.StockStatus
                           }));
-                          exportToExcel(exportData, 'Pending_SO_Report');
+                          exportToExcel(exportData, 'Pending_SO_Extract_Report_With_Aging');
                         }}
                         className="flex items-center gap-1.5 bg-text-main text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-primary active:scale-95 transition-all"
                       >
@@ -1689,7 +1833,9 @@ function MainApp() {
                         <table className="excel-table">
                            <thead>
                               <tr>
+                                 <Th sortKey="Date" onSort={handleSort} activeField={sortField} direction={sortDirection} className="whitespace-nowrap">Order Date</Th>
                                  <Th sortKey="DueOn" onSort={handleSort} activeField={sortField} direction={sortDirection} className="whitespace-nowrap">Due Date</Th>
+                                 <Th sortKey="Aging" onSort={handleSort} activeField={sortField} direction={sortDirection} className="whitespace-nowrap">Overdue</Th>
                                  <Th sortKey="Order" onSort={handleSort} activeField={sortField} direction={sortDirection}>Voucher No</Th>
                                  <Th sortKey="PartyName" onSort={handleSort} activeField={sortField} direction={sortDirection}>Customer Name</Th>
                                  <Th sortKey="NameOfItem" onSort={handleSort} activeField={sortField} direction={sortDirection}>Item Name / Description</Th>
@@ -1701,8 +1847,25 @@ function MainApp() {
                            <tbody className="bg-white">
                               {(filteredSO || []).map((r, idx) => (
                                 <tr key={idx} className="hover:bg-slate-50 transition-colors group">
+                                  <td className="whitespace-nowrap text-text-muted">
+                                     {fmtDate(r.Date)}
+                                  </td>
                                   <td className={cn("font-bold whitespace-nowrap", r.OrderType === 'Due' ? "text-danger" : "text-primary")}>
-                                     {fmtDate(r.DueOn || r.Date)}
+                                     {fmtDate(r.DueOn)}
+                                  </td>
+                                  <td className="whitespace-nowrap">
+                                     <span 
+                                       className="px-2 py-0.5 rounded text-[9px] font-black uppercase inline-block text-white"
+                                       style={{
+                                         backgroundColor: r.Aging === '1 Year or older' ? '#ef4444' :
+                                                         r.Aging === '180 and more days' ? '#f59e0b' :
+                                                         r.Aging === 'Below 30 days' ? '#10b98122' : '#3b82f622',
+                                         color: (r.Aging === '1 Year or older' || r.Aging === '180 and more days') ? 'white' : 
+                                                r.Aging === 'Below 30 days' ? '#10b981' : '#3b82f6'
+                                       }}
+                                     >
+                                       {r.Aging || 'Below 30 days'}
+                                     </span>
                                   </td>
                                   <td className="font-mono text-text-muted uppercase">{r.Order}</td>
                                   <td className="font-black text-text-main uppercase group-hover:text-primary transition-colors cursor-pointer" onClick={() => setShowSOPopup(r.PartyName)}>
@@ -1726,6 +1889,14 @@ function MainApp() {
                                 </tr>
                               ))}
                            </tbody>
+                           <tfoot className="sticky bottom-0 bg-slate-50 border-t-2 border-grid z-20 font-bold text-text-main">
+                               <tr>
+                                  <td colSpan={6} className="text-right uppercase tracking-wider text-[9px] text-text-muted px-4 py-2">Grand Total:</td>
+                                  <td className="text-right text-[11px]">{fmtNum(filteredSO.reduce((s, r) => s + (r.Balance || 0), 0))}</td>
+                                  <td className="text-right text-[11px] text-primary">{fmtCur(filteredSO.reduce((s, r) => s + (r.Value || 0), 0))}</td>
+                                  <td></td>
+                               </tr>
+                            </tfoot>
                         </table>
                      </div>
                   </div>
@@ -1888,13 +2059,25 @@ function MainApp() {
                         onClick={() => {
                           const exportData = filteredStockList.map(r => ({
                             "Item Description": r.Particulars,
-                            "Available Stock": r.Quantity
+                            "Stock Qty": r.Quantity,
+                            "Rate": r.Rate,
+                            "Stock Value": r.Value,
+                            "SO Due Qty": r.soDueQty,
+                            "SO Due Val": r.soDueVal,
+                            "SO Sched Qty": r.soSchedQty,
+                            "SO Sched Val": r.soSchedVal,
+                            "PO Due Qty": r.poDueQty,
+                            "PO Due Val": r.poDueVal,
+                            "PO Sched Qty": r.poSchedQty,
+                            "PO Sched Val": r.poSchedVal,
+                            "Net Qty": r.netQty,
+                            "Net Value": r.netValue
                           }));
-                          exportToExcel(exportData, 'Stock_Inventory_Report');
+                          exportToExcel(exportData, 'Comprehensive_Stock_Planning_Report');
                         }}
                         className="flex items-center gap-1.5 bg-text-main text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-primary active:scale-95 transition-all"
                       >
-                        <Download className="w-3.5 h-3.5" /> EXPORT
+                        <Download className="w-3.5 h-3.5" /> EXPORT REPORT
                       </button>
                     </div>
                     <input type="file" ref={fileInputStockRef} onChange={handleStockUpload} className="hidden" accept=".xlsx, .xls, .csv" />
@@ -1902,34 +2085,75 @@ function MainApp() {
 
                   <div className="bg-surface border border-border-custom shadow-sm overflow-hidden">
                      <div className="overflow-x-auto scrollbar-custom max-h-[calc(100vh-340px)]">
-                        <table className="excel-table">
-                           <thead>
+                        <table className="excel-table" style={{ fontFamily: "'Cambria', serif", fontSize: '9pt' }}>
+                           <thead className="sticky top-0 bg-white z-20">
                               <tr>
-                                 <Th sortKey="Particulars" onSort={handleSort} activeField={sortField} direction={sortDirection}>Description / Particulars</Th>
-                                 <Th sortKey="Quantity" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right">Quantity</Th>
-                                 <Th sortKey="Rate" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right">Rate</Th>
-                                 <Th sortKey="Value" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right">Total Valuation</Th>
+                                 <Th rowSpan={2} sortKey="Particulars" onSort={handleSort} activeField={sortField} direction={sortDirection}>Item Description</Th>
+                                 <Th rowSpan={2} sortKey="Quantity" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right">Stock Qty</Th>
+                                 <Th rowSpan={2} sortKey="Rate" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right">Rate</Th>
+                                 <Th rowSpan={2} sortKey="Value" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right bg-slate-50">Stock Valuation</Th>
+                                 <th colSpan={4} className="text-center bg-danger/5 text-danger border border-grid py-1 text-[10px] font-black uppercase">Pending Sales Orders</th>
+                                 <th colSpan={4} className="text-center bg-primary/5 text-primary border border-grid py-1 text-[10px] font-black uppercase">Pending Purchase Orders</th>
+                                 <th colSpan={2} className="text-center bg-avail/5 text-avail border border-grid py-1 text-[10px] font-black uppercase">Net Position</th>
+                              </tr>
+                              <tr>
+                                 <Th sortKey="soDueQty" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right text-[8px] bg-danger/5">Due Qty</Th>
+                                 <Th sortKey="soDueVal" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right text-[8px] bg-danger/5">Due Val</Th>
+                                 <Th sortKey="soSchedQty" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right text-[8px] bg-danger/5">Sched Qty</Th>
+                                 <Th sortKey="soSchedVal" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right text-[8px] bg-danger/5">Sched Val</Th>
+                                 
+                                 <Th sortKey="poDueQty" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right text-[8px] bg-primary/5">Due Qty</Th>
+                                 <Th sortKey="poDueVal" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right text-[8px] bg-primary/5">Due Val</Th>
+                                 <Th sortKey="poSchedQty" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right text-[8px] bg-primary/5">Sched Qty</Th>
+                                 <Th sortKey="poSchedVal" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right text-[8px] bg-primary/5">Sched Val</Th>
+                                 
+                                 <Th sortKey="netQty" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right text-[8px] bg-avail/5">Net Qty</Th>
+                                 <Th sortKey="netValue" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right text-[8px] bg-avail/5">Net Val</Th>
                               </tr>
                            </thead>
                            <tbody className="bg-white">
                               {(filteredStockList || []).map((s, idx) => (
                                 <tr key={idx} className="hover:bg-slate-50 transition-colors group">
-                                  <td className="font-black text-text-main uppercase whitespace-normal leading-tight max-w-[400px]">{s.Particulars}</td>
-                                  <td className="text-right font-black text-text-main">{fmtNum(s.Quantity)}</td>
-                                  <td className="text-right font-black text-text-muted">{fmtCur(s.Rate)}</td>
-                                  <td className="text-right font-black text-primary bg-slate-50/30">{fmtCur(s.Value)}</td>
+                                  <td className="font-medium text-text-main leading-tight max-w-[250px] truncate">{s.Particulars}</td>
+                                  <td className="text-right font-medium">{fmtNum(s.Quantity)}</td>
+                                  <td className="text-right font-medium text-text-muted">{fmtCur(s.Rate)}</td>
+                                  <td className="text-right font-bold text-text-main bg-slate-50/50">{fmtCur(s.Value)}</td>
+                                  
+                                  <td className="text-right text-danger/80">{fmtNum(s.soDueQty)}</td>
+                                  <td className="text-right text-danger/80">{fmtCur(s.soDueVal)}</td>
+                                  <td className="text-right text-text-muted/60">{fmtNum(s.soSchedQty)}</td>
+                                  <td className="text-right text-text-muted/60">{fmtCur(s.soSchedVal)}</td>
+                                  
+                                  <td className="text-right text-primary">{fmtNum(s.poDueQty)}</td>
+                                  <td className="text-right text-primary">{fmtCur(s.poDueVal)}</td>
+                                  <td className="text-right text-text-muted/60">{fmtNum(s.poSchedQty)}</td>
+                                  <td className="text-right text-text-muted/60">{fmtCur(s.poSchedVal)}</td>
+                                  
+                                  <td className={cn("text-right font-black", s.netQty < 0 ? "text-danger" : "text-avail")}>{fmtNum(s.netQty)}</td>
+                                  <td className={cn("text-right font-black", s.netValue < 0 ? "text-danger" : "text-avail")}>{fmtCur(s.netValue)}</td>
                                 </tr>
                               ))}
                            </tbody>
                            {filteredStockList.length > 0 && (
-                             <tfoot className="sticky bottom-0 bg-white border-t-2 border-grid">
-                               <tr className="font-black text-text-main">
-                                  <td className="text-right uppercase tracking-wider text-[10px] text-text-muted">Consolidated Inventory Value</td>
+                             <tfoot className="sticky bottom-0 bg-slate-50 border-t-2 border-grid z-30 font-bold text-text-main">
+                               <tr>
+                                  <td className="text-right uppercase tracking-wider text-[9px] text-text-muted px-4 py-2">Grand Total:</td>
+                                  <td className="text-right text-[10px]">{fmtNum(filteredStockList.reduce((s, r) => s + (r.Quantity || 0), 0))}</td>
                                   <td></td>
-                                  <td></td>
-                                  <td className="text-right text-[14px] text-primary bg-primary/5 border-l border-grid">
-                                    {fmtCur(filteredStockList.reduce((sum, item) => sum + item.Value, 0))}
-                                  </td>
+                                  <td className="text-right text-[10px] bg-slate-100">{fmtCur(filteredStockList.reduce((s, r) => s + (r.Value || 0), 0))}</td>
+                                  
+                                  <td className="text-right text-[10px] text-danger">{fmtNum(filteredStockList.reduce((s, r) => s + (r.soDueQty || 0), 0))}</td>
+                                  <td className="text-right text-[10px] text-danger">{fmtCur(filteredStockList.reduce((s, r) => s + (r.soDueVal || 0), 0))}</td>
+                                  <td className="text-right text-[10px] text-text-muted/60">{fmtNum(filteredStockList.reduce((s, r) => s + (r.soSchedQty || 0), 0))}</td>
+                                  <td className="text-right text-[10px] text-text-muted/60">{fmtCur(filteredStockList.reduce((s, r) => s + (r.soSchedVal || 0), 0))}</td>
+                                  
+                                  <td className="text-right text-[10px] text-primary">{fmtNum(filteredStockList.reduce((s, r) => s + (r.poDueQty || 0), 0))}</td>
+                                  <td className="text-right text-[10px] text-primary">{fmtCur(filteredStockList.reduce((s, r) => s + (r.poDueVal || 0), 0))}</td>
+                                  <td className="text-right text-[10px] text-text-muted/60">{fmtNum(filteredStockList.reduce((s, r) => s + (r.poSchedQty || 0), 0))}</td>
+                                  <td className="text-right text-[10px] text-text-muted/60">{fmtCur(filteredStockList.reduce((s, r) => s + (r.poSchedVal || 0), 0))}</td>
+                                  
+                                  <td className="text-right text-[10px] bg-avail/5">{fmtNum(filteredStockList.reduce((s, r) => s + (r.netQty || 0), 0))}</td>
+                                  <td className="text-right text-[10px] bg-avail/5">{fmtCur(filteredStockList.reduce((s, r) => s + (r.netValue || 0), 0))}</td>
                                </tr>
                              </tfoot>
                            )}
@@ -2137,6 +2361,12 @@ function MainApp() {
                         <Upload className="w-3.5 h-3.5" /> UPLOAD INVOICE
                       </button>
                       <button 
+                        onClick={() => handleExtractData()}
+                        className="flex items-center gap-1.5 bg-secondary text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider shadow-md hover:bg-secondary/90 active:scale-95 transition-all"
+                      >
+                        <FileCode className="w-3.5 h-3.5" /> EXTRACT
+                      </button>
+                      <button 
                         onClick={() => { if(confirm('Reset Invoice data?')) handleReset('invoice') }}
                         className="flex items-center gap-1.5 bg-white border border-border-custom text-text-muted px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider hover:bg-surface2 active:scale-95 transition-all shadow-sm"
                       >
@@ -2261,7 +2491,9 @@ function MainApp() {
                            const exportData = customersList.map(c => ({
                              "Customer Name": c.name,
                              "Total Pending SO": c.total,
-                             "Due Orders": c.dueVal,
+                             "Due (Available)": c.dueAvail,
+                             "Due (Expedite)": c.dueExp,
+                             "Due (Need Order)": c.dueNeed,
                              "Schedule Orders": c.schedVal,
                              "Total Invoiced": c.invVal
                            }));
@@ -2275,39 +2507,43 @@ function MainApp() {
 
                   <div className="bg-surface border border-border-custom rounded-2xl overflow-hidden shadow-sm">
                      <div className="overflow-x-auto scrollbar-custom max-h-[calc(100vh-320px)]">
-                        <table className="excel-table">
+                        <table className="excel-table" style={{ fontFamily: "'Cambria', serif", fontSize: '10pt' }}>
                            <thead>
-                              <tr>
-                                 <th>Customer Name</th>
-                                 <th className="text-right">Total Pending SO</th>
-                                 <th className="text-right">Due Orders</th>
-                                 <th className="text-right">Schedule Orders</th>
-                                 <th className="text-right">Total Invoiced</th>
+                              <tr className="bg-slate-50">
+                                 <Th sortKey="name" onSort={handleSort} activeField={sortField} direction={sortDirection}>Customer Name</Th>
+                                 <Th sortKey="total" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right">Total Pending SO</Th>
+                                 <Th sortKey="dueAvail" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right text-avail">Due (Avail)</Th>
+                                 <Th sortKey="dueExp" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right text-primary">Due (Expedite)</Th>
+                                 <Th sortKey="dueNeed" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right text-danger">Due (Need Order)</Th>
+                                 <Th sortKey="schedVal" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right">Schedule Orders</Th>
+                                 <Th sortKey="invVal" onSort={handleSort} activeField={sortField} direction={sortDirection} className="text-right">Total Invoiced</Th>
                                  <th className="text-center">Action</th>
                               </tr>
                            </thead>
                            <tbody className="bg-white">
                               {(customersList || []).map((c, idx) => (
                                 <tr key={idx} className="hover:bg-slate-50 transition-colors group">
-                                  <td className="font-black text-text-main uppercase text-[13px]">{c.name}</td>
-                                  <td className="text-right font-black text-primary">
-                                     <button 
-                                      onClick={() => setShowSOPopup(c.name)}
-                                      className="hover:underline hover:text-primary/80 transition-all"
-                                     >
-                                       {fmtCur(c.total)}
-                                     </button>
-                                  </td>
-                                  <td className="text-right font-bold text-danger">{fmtCur(c.dueVal)}</td>
-                                  <td className="text-right font-bold text-text-muted">{fmtCur(c.schedVal)}</td>
-                                  <td className="text-right font-black text-avail">
-                                     <button 
-                                      onClick={() => setShowInvPopup(c.name)}
-                                      className="hover:underline hover:text-avail/80 transition-all"
-                                     >
-                                       {fmtCur(c.invVal)}
-                                     </button>
-                                  </td>
+                                   <td className="font-medium text-text-main">{c.name}</td>
+                                   <td className="text-right font-medium text-primary">
+                                      <button 
+                                       onClick={() => setShowSOPopup(c.name)}
+                                       className="hover:underline hover:text-primary/80 transition-all"
+                                      >
+                                        {fmtCur(c.total)}
+                                      </button>
+                                   </td>
+                                   <td className="text-right font-medium text-avail">{fmtCur(c.dueAvail)}</td>
+                                   <td className="text-right font-medium text-primary/70">{fmtCur(c.dueExp)}</td>
+                                   <td className="text-right font-medium text-danger">{fmtCur(c.dueNeed)}</td>
+                                   <td className="text-right font-medium text-text-muted">{fmtCur(c.schedVal)}</td>
+                                   <td className="text-right font-medium text-avail">
+                                      <button 
+                                       onClick={() => setShowInvPopup(c.name)}
+                                       className="hover:underline hover:text-avail/80 transition-all"
+                                      >
+                                        {fmtCur(c.invVal)}
+                                      </button>
+                                   </td>
                                   <td className="text-center">
                                     <div className="flex justify-center gap-2">
                                       <button onClick={() => setShowSOPopup(c.name)} className="p-1.5 rounded-lg bg-primary/10 text-primary hover:bg-primary hover:text-white transition-all" title="View SO Report">
@@ -2328,6 +2564,18 @@ function MainApp() {
                                  </tr>
                               )}
                            </tbody>
+                           <tfoot className="sticky bottom-0 bg-slate-50 border-t-2 border-grid z-30 font-bold text-text-main">
+                             <tr style={{ fontFamily: "'Cambria', serif", fontSize: '10pt' }}>
+                               <td className="px-4 py-2 text-right uppercase tracking-wider text-[9px] text-text-muted">Grand Total:</td>
+                               <td className="text-right text-[11px] text-primary">{fmtCur(customersList.reduce((s, r) => s + (r.total || 0), 0))}</td>
+                               <td className="text-right text-[11px] text-avail">{fmtCur(customersList.reduce((s, r) => s + (r.dueAvail || 0), 0))}</td>
+                               <td className="text-right text-[11px] text-primary/70">{fmtCur(customersList.reduce((s, r) => s + (r.dueExp || 0), 0))}</td>
+                               <td className="text-right text-[11px] text-danger">{fmtCur(customersList.reduce((s, r) => s + (r.dueNeed || 0), 0))}</td>
+                               <td className="text-right text-[11px] text-text-muted">{fmtCur(customersList.reduce((s, r) => s + (r.schedVal || 0), 0))}</td>
+                               <td className="text-right text-[11px] text-avail">{fmtCur(customersList.reduce((s, r) => s + (r.invVal || 0), 0))}</td>
+                               <td></td>
+                             </tr>
+                           </tfoot>
                         </table>
                      </div>
                   </div>
@@ -2383,8 +2631,7 @@ function MainApp() {
                     onClick={() => {
                       const s = cSearch.toLowerCase();
                       const exportData = processedSO
-                        .filter(r => r.PartyName === showSOPopup)
-                        .filter(r => activeTab !== 'customers' || !cSearch || (r.Order || "").toLowerCase().includes(s) || (r.NameOfItem || "").toLowerCase().includes(s))
+                        .filter(r => (r.PartyName || "").trim().toUpperCase() === (showSOPopup || "").trim().toUpperCase())
                         .map(r => ({
                           "Due Date": fmtDate(r.DueOn || r.Date),
                           "Ref No": r.Order,
@@ -2413,8 +2660,7 @@ function MainApp() {
                    {(() => {
                       const s = cSearch.toLowerCase();
                       const items = processedSO
-                         .filter(r => r.PartyName === showSOPopup)
-                         .filter(r => activeTab !== 'customers' || !cSearch || (r.Order || "").toLowerCase().includes(s) || (r.NameOfItem || "").toLowerCase().includes(s));
+                         .filter(r => (r.PartyName || "").trim().toUpperCase() === (showSOPopup || "").trim().toUpperCase());
                       const total = items.reduce((s, r) => s + r.Value, 0);
                       const dueVal = items.filter(r => r.OrderType === 'Due').reduce((s, r) => s + r.Value, 0);
                       const availVal = items.filter(r => r.StockStatus === 'Available').reduce((s, r) => s + r.Value, 0);
@@ -2439,7 +2685,7 @@ function MainApp() {
                       <h4 className="text-[11px] font-black text-text-main uppercase tracking-widest">Specific Pending Line Items</h4>
                    </div>
                    <table className="w-full text-left text-[12px] border-separate border-spacing-0">
-                      <thead className="sticky top-0 bg-white z-10 font-black uppercase text-[10px] text-text-muted">
+                      <thead className="sticky top-0 bg-white z-10 font-bold text-[10px] text-text-muted">
                          <tr>
                             <th className="px-6 py-4 border-b border-border-custom text-avail">Due Date</th>
                             <th className="px-4 py-4 border-b border-border-custom">Ref No</th>
@@ -2451,16 +2697,18 @@ function MainApp() {
                       </thead>
                       <tbody className="divide-y divide-border-custom">
                          {(() => {
-                            const s = cSearch.toLowerCase();
                             return processedSO
-                              .filter(r => r.PartyName === showSOPopup)
-                              .filter(r => activeTab !== 'customers' || !cSearch || (r.Order || "").toLowerCase().includes(s) || (r.NameOfItem || "").toLowerCase().includes(s))
-                              .filter(r => !popupSearch || (r.NameOfItem || "").toLowerCase().includes(popupSearch.toLowerCase()) || (r.Order || "").toLowerCase().includes(popupSearch.toLowerCase()))
-                              .sort((a,b) => new Date(a.DueOn || 0).getTime() - new Date(b.DueOn || 0).getTime())
-                              .map((r, i) => (
+                               .filter(r => (r.PartyName || "").trim().toUpperCase() === (showSOPopup || "").trim().toUpperCase())
+                               .filter(r => !popupSearch || (r.NameOfItem || "").toLowerCase().includes(popupSearch.toLowerCase()) || (String(r.Order) || "").toLowerCase().includes(popupSearch.toLowerCase()))
+                               .sort((a,b) => {
+                                 const dA = parseDateObj(a.DueOn || a.Date)?.getTime() || 0;
+                                 const dB = parseDateObj(b.DueOn || b.Date)?.getTime() || 0;
+                                 return dA - dB;
+                               })
+                               .map((r, i) => (
                             <tr key={i} className="hover:bg-slate-50 transition-colors">
                                <td className="px-6 py-4 font-bold text-text-muted">{fmtDate(r.DueOn || r.Date)}</td>
-                               <td className="px-4 py-4 font-mono font-black text-text-muted uppercase">#{r.Order.slice(-10)}</td>
+                               <td className="px-4 py-4 font-mono font-black text-text-muted uppercase">#{String(r.Order).slice(-10)}</td>
                                <td className="px-4 py-4 font-bold text-text-main max-w-[200px] truncate">{r.NameOfItem}</td>
                                <td className="px-4 py-4 text-right font-black">{fmtNum(r.Balance)}</td>
                                <td className="px-4 py-4 text-right font-black text-primary">{fmtCur(r.Value)}</td>
@@ -2519,10 +2767,8 @@ function MainApp() {
                 <div className="flex items-center gap-4">
                    <button 
                      onClick={() => {
-                       const s = cSearch.toLowerCase();
-                       const filteredInvoices = dynamicInvoices.filter(inv => (inv.Buyer || "").toLowerCase().trim() === showInvPopup?.toLowerCase().trim());
+                       const filteredInvoices = dynamicInvoices.filter(inv => (inv.Buyer || "").trim().toUpperCase() === (showInvPopup || "").trim().toUpperCase());
                        const exportData = filteredInvoices
-                          .filter(inv => activeTab !== 'customers' || !cSearch || (inv.VoucherNo || "").toLowerCase().includes(s) || (inv.VoucherRef || "").toLowerCase().includes(s) || (inv.Particulars || "").toLowerCase().includes(s))
                           .map(inv => ({
                          "Date": fmtDate(inv.Date),
                          "Invoice No": inv.VoucherNo,
@@ -2547,9 +2793,9 @@ function MainApp() {
                  </div>
                </div>
                <div className="flex-1 overflow-y-auto scrollbar-custom p-8 bg-slate-50/20">
-                  <div className="bg-white border border-border-custom rounded-2xl overflow-hidden shadow-sm">
+                  <div className="bg-white border border-border-custom rounded-2xl overflow-hidden shadow-sm" style={{ fontFamily: "'Cambria', serif", fontSize: '10pt' }}>
                     <table className="w-full text-left text-[11px] border-separate border-spacing-0">
-                       <thead className="bg-slate-50/50 sticky top-0 z-10 font-black text-text-muted uppercase text-[10px] border-b border-border-custom">
+                       <thead className="bg-slate-50/50 sticky top-0 z-10 font-bold text-text-muted text-[10px] border-b border-border-custom">
                           <tr>
                              <th className="px-6 py-4 border-b border-border-custom">Date</th>
                              <th className="px-4 py-4 border-b border-border-custom">Invoice No</th>
@@ -2562,11 +2808,9 @@ function MainApp() {
                         </thead>
                         <tbody className="divide-y divide-slate-100">
                           {(() => {
-                            const s = cSearch.toLowerCase();
                             const flatItems = dynamicInvoices
-                              .filter(inv => (inv.Buyer || "").toLowerCase().trim() === showInvPopup?.toLowerCase().trim())
-                              .filter(inv => activeTab !== 'customers' || !cSearch || (inv.VoucherNo || "").toLowerCase().includes(s) || (inv.VoucherRef || "").toLowerCase().includes(s) || (inv.Particulars || "").toLowerCase().includes(s))
-                              .filter(inv => !popupSearch || (inv.Particulars || "").toLowerCase().includes(popupSearch.toLowerCase()) || (inv.VoucherNo || "").toLowerCase().includes(popupSearch.toLowerCase()) || (inv.VoucherRef || "").toLowerCase().includes(popupSearch.toLowerCase()));
+                              .filter(inv => (inv.Buyer || "").trim().toUpperCase() === (showInvPopup || "").trim().toUpperCase())
+                              .filter(inv => !popupSearch || (inv.Particulars || "").toLowerCase().includes(popupSearch.toLowerCase()) || (String(inv.VoucherNo) || "").toLowerCase().includes(popupSearch.toLowerCase()) || (String(inv.VoucherRef) || "").toLowerCase().includes(popupSearch.toLowerCase()));
 
                             if (flatItems.length === 0) {
                               return (
@@ -2590,8 +2834,8 @@ function MainApp() {
                                 {flatItems.map((it, idx) => (
                                   <tr key={idx} className="hover:bg-slate-50/50 transition-colors">
                                     <td className="px-6 py-4 font-bold text-text-muted whitespace-nowrap">{fmtDate(it.Date)}</td>
-                                    <td className="px-4 py-4 font-mono font-black text-text-muted uppercase whitespace-nowrap">#{it.VoucherNo}</td>
-                                    <td className="px-4 py-4 font-bold text-text-muted uppercase whitespace-nowrap text-[10px]">{it.VoucherRef}</td>
+                                    <td className="px-4 py-4 font-mono font-black text-text-muted uppercase whitespace-nowrap">#{String(it.VoucherNo)}</td>
+                                    <td className="px-4 py-4 font-bold text-text-muted uppercase whitespace-nowrap text-[10px]">{String(it.VoucherRef)}</td>
                                     <td className="px-4 py-4 font-bold text-text-main max-w-[300px] truncate">{it.Particulars}</td>
                                     <td className="px-4 py-4 text-right font-black">{it.Quantity}</td>
                                     <td className="px-4 py-4 text-right font-bold text-text-muted">{fmtCur(it.Value / (it.Quantity || 1))}</td>
