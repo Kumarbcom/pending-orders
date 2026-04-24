@@ -7,4 +7,7 @@ if (!supabaseUrl || !supabaseAnonKey) {
   console.warn('Supabase credentials not configured. Using local storage only.');
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// Only create the client if the URL and Key are actually present
+export const supabase = (supabaseUrl && supabaseAnonKey) 
+  ? createClient(supabaseUrl, supabaseAnonKey) 
+  : null;
