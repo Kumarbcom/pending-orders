@@ -23,7 +23,9 @@ import {
   X,
   Menu,
   FileCheck,
-  FileCode
+  FileCode,
+  Trash2,
+  DownloadCloud
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { 
@@ -422,6 +424,27 @@ function MainApp() {
     } finally {
       setIsSyncing(false);
     }
+  };
+
+  const downloadTemplates = () => {
+    const wb = XLSX.utils.book_new();
+    
+    // Exact headers expected by the parsing logic
+    const soHeaders = [["Buyer", "Voucher No.", "Date", "Particulars", "Material Description", "Due on", "Item Value", "Sales Person", "Order Type", "Contact Person"]];
+    const poHeaders = [["Buyer", "Voucher No.", "Date", "Particulars", "Material Description", "Due on", "Item Value", "Order Type"]];
+    const stockHeaders = [["Material Description", "Closing Balance"]];
+    const matHeaders = [["Material Description", "Material Group", "Item Code"]];
+    const custHeaders = [["Customer Name", "Customer Group", "Sales Person"]];
+    const invHeaders = [["Date", "Buyer", "Consignee", "Voucher No.", "Voucher Ref.", "GSTIN/UIN", "Product", "Billed Qty", "Rate", "Amount"]];
+
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(soHeaders), "Pending SO");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(poHeaders), "Pending PO");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(stockHeaders), "Stock");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(matHeaders), "Material Master");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(custHeaders), "Customer Master");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(invHeaders), "Invoices");
+
+    XLSX.writeFile(wb, "SiddhiKabel_Data_Templates.xlsx");
   };
 
   // Close upload menu on outside click
@@ -1416,6 +1439,20 @@ function MainApp() {
            <button className="flex items-center gap-3 px-3 py-2.5 w-full rounded-xl text-[13px] font-semibold text-text-muted hover:bg-surface2 transition-all">
              <RefreshCw className="w-4 h-4" />
              {!sidebarCollapsed && <span>Sync Data</span>}
+           </button>
+           <button 
+             onClick={downloadTemplates}
+             className="flex items-center gap-3 px-3 py-2.5 w-full rounded-xl text-[13px] font-semibold text-blue-500 hover:bg-blue-50 transition-all"
+           >
+             <DownloadCloud className="w-4 h-4" />
+             {!sidebarCollapsed && <span>Download Templates</span>}
+           </button>
+           <button 
+             onClick={handleWipeData}
+             className="flex items-center gap-3 px-3 py-2.5 w-full rounded-xl text-[13px] font-semibold text-red-500 hover:bg-red-50 transition-all"
+           >
+             <Trash2 className="w-4 h-4" />
+             {!sidebarCollapsed && <span>Clear All Data</span>}
            </button>
         </div>
       </aside>
