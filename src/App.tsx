@@ -430,12 +430,12 @@ function MainApp() {
     const wb = XLSX.utils.book_new();
     
     // Exact headers expected by the parsing logic
-    const soHeaders = [["Buyer", "Voucher No.", "Date", "Particulars", "Material Description", "Due on", "Item Value", "Sales Person", "Order Type", "Contact Person"]];
-    const poHeaders = [["Buyer", "Voucher No.", "Date", "Particulars", "Material Description", "Due on", "Item Value", "Order Type"]];
-    const stockHeaders = [["Material Description", "Closing Balance"]];
-    const matHeaders = [["Material Description", "Material Group", "Item Code"]];
-    const custHeaders = [["Customer Name", "Customer Group", "Sales Person"]];
-    const invHeaders = [["Date", "Buyer", "Consignee", "Voucher No.", "Voucher Ref.", "GSTIN/UIN", "Product", "Billed Qty", "Rate", "Amount"]];
+    const soHeaders = [["Party's Name", "Name of Item", "Date", "Voucher No", "Material Code", "Part No", "Ordered Qty", "Balance Qty", "Rate", "Discount", "Value", "Due on"]];
+    const poHeaders = [["Supplier", "Name of Item", "Date", "Voucher No", "Material Code", "Part No", "Ordered Qty", "Balance Qty", "Rate", "Discount", "Value", "Due on"]];
+    const stockHeaders = [["Particulars", "Closing Stock", "Rate", "Value"]];
+    const matHeaders = [["Description", "Part No", "Make", "Material Group"]];
+    const custHeaders = [["Customer Name", "Group", "Sales Rep", "Status", "Customer Group"]];
+    const invHeaders = [["Date", "Buyer", "Consignee", "Particulars", "Voucher Type", "Voucher No.", "Voucher Ref. No.", "GSTIN/UIN", "Quantity", "Value"]];
 
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(soHeaders), "Pending SO");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(poHeaders), "Pending PO");
