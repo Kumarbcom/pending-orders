@@ -435,7 +435,7 @@ function MainApp() {
     const stockHeaders = [["Particulars", "Closing Stock", "Rate", "Value"]];
     const matHeaders = [["Description", "Part No", "Make", "Material Group"]];
     const custHeaders = [["Customer Name", "Group", "Sales Rep", "Status", "Customer Group"]];
-    const invHeaders = [["Date", "Buyer", "Consignee", "Particulars", "Voucher Type", "Voucher No.", "Voucher Ref. No.", "GSTIN/UIN", "Quantity", "Value"]];
+    const invHeaders = [["Date", "Particulars", "Buyer", "Consignee", "Voucher Type", "Voucher No.", "Voucher Ref. No.", "GSTIN/UIN", "Quantity", "Value", "Gross Total"]];
 
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(soHeaders), "Pending SO");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(poHeaders), "Pending PO");
